@@ -173,7 +173,12 @@ class CarlaLaneFollowingStudentEnv(gym.Env):
         # Setup blueprint library
         self.blueprint_library = self.world.get_blueprint_library()
 
-        self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+        # self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+
+        self._spawn_queue = deque(np.random.permutation(len(EGO_SPAWN_POINT)))
+        self.spawn_index = self._spawn_queue.popleft()
+
+
 
         self.ego_transform = carla.Transform(
             carla.Location(x = EGO_SPAWN_POINT[self.spawn_index][0], y = EGO_SPAWN_POINT[self.spawn_index][1], z = EGO_SPAWN_POINT[self.spawn_index][2]),
@@ -238,6 +243,12 @@ class CarlaLaneFollowingStudentEnv(gym.Env):
             "collision": 1 if self.collision_detected else 0,
             "lane_invasion": 1 if self.lane_invasion_detected else 0,
         }
+    
+
+    def _next_spawn_index(self):
+        if not self._spawn_queue:
+            self._spawn_queue.extend(np.random.permutation(len(EGO_SPAWN_POINT)))
+        return self._spawn_queue.popleft()
     
 
     def compute_goal_reward(self, ag, dg, info):
@@ -325,8 +336,12 @@ class CarlaLaneFollowingStudentEnv(gym.Env):
         self._hard_world_cleanup()
         self._clean_actors()
 
+        if not self._spawn_queue:
+            self._spawn_queue = deque(np.random.permutation(len(EGO_SPAWN_POINT)))
+        self.spawn_index = self._spawn_queue.popleft()
 
-        self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+
+        # self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
 
         self.ego_transform = carla.Transform(
             carla.Location(x = EGO_SPAWN_POINT[self.spawn_index][0], y = EGO_SPAWN_POINT[self.spawn_index][1], z = EGO_SPAWN_POINT[self.spawn_index][2]),

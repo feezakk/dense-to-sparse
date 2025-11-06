@@ -118,6 +118,7 @@ class CarlaLaneFollowingEnv(gym.Env):
 
         # remove old vehicles and sensors (in case they survived)
         self.world.tick()
+
         
 
         # Load or get the world
@@ -162,7 +163,11 @@ class CarlaLaneFollowingEnv(gym.Env):
         # Setup blueprint library
         self.blueprint_library = self.world.get_blueprint_library()
 
-        self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+
+        self._spawn_queue = deque(np.random.permutation(len(EGO_SPAWN_POINT)))
+        self.spawn_index = self._spawn_queue.popleft()
+
+        # self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
 
         self.ego_transform = carla.Transform(
             carla.Location(x = EGO_SPAWN_POINT[self.spawn_index][0], y = EGO_SPAWN_POINT[self.spawn_index][1], z = EGO_SPAWN_POINT[self.spawn_index][2]),
@@ -197,6 +202,11 @@ class CarlaLaneFollowingEnv(gym.Env):
         self.initial_distance_to_goal = 270
         self.previous_lane_invasions = 0
         self.previous_collisions = 0
+
+    def _next_spawn_index(self):
+        if not self._spawn_queue:
+            self._spawn_queue.extend(np.random.permutation(len(EGO_SPAWN_POINT)))
+        return self._spawn_queue.popleft()
 
 
     # --------------------------------------------------------------------------------
@@ -261,8 +271,12 @@ class CarlaLaneFollowingEnv(gym.Env):
     def reset(self):
         self._clean_actors()
 
+        if not self._spawn_queue:
+            self._spawn_queue = deque(np.random.permutation(len(EGO_SPAWN_POINT)))
+        self.spawn_index = self._spawn_queue.popleft()
 
-        self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+
+        # self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
 
         self.ego_transform = carla.Transform(
             carla.Location(x = EGO_SPAWN_POINT[self.spawn_index][0], y = EGO_SPAWN_POINT[self.spawn_index][1], z = EGO_SPAWN_POINT[self.spawn_index][2]),

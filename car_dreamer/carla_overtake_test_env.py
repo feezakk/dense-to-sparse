@@ -87,7 +87,7 @@ def distance_2d(loc1, loc2):
 # --------------------------------------------------------------------------------
 # Example single-file environment for overtaking
 # --------------------------------------------------------------------------------
-class CarlaOvertakeEnv(gym.Env):
+class CarlaOvertakeTestEnv(gym.Env):
     def __init__(self, config):
         super().__init__()
 

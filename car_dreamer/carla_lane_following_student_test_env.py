@@ -20,15 +20,53 @@ import os
 from collections import deque
 import weakref, queue
 
-EGO_SPAWN_POINT = [[71.929916, -6.996726, 1.050581, 0.953298, -62.641895, 0.000000],
-                   [59.233459, -68.268501, 5.817840, 4.703701, -81.431274, 0.000000],
-                   [67.262825, -114.866020, 9.692015, 4.703701, -85.152115, 0.000000],
-                   [44.566227, -177.097443, 6.951100, -4.487109, -93.109505, 0.000000]]
 
-EGO_END_POINT =    [[59.233459, -68.268501, 5.817840, 4.703701, -81.431274, 0.000000],
-                   [67.262825, -114.866020, 9.692015, 4.703701, -85.152115, 0.000000],
-                   [44.566227, -177.097443, 6.951100, -4.487109, -93.109505, 0.000000],
-                   [6.476024, -241.105026, 1, 2.601381, -192.499680, 0.000000]]
+EGO_SPAWN_POINT = [
+    # one-turn scenarios
+    
+    # [71.58, -6.94, 1.01,  0.953298, -62.641895, 0.000000], #ok
+    [74.51, 7.51, 1.01,  0.953298, 45, 0.000000], #ok
+    [68.92, 72.00, 1.01, 4.703701, -280, 0.000000], #ok
+    [-90.68, 121.28, 1.01, 0, 0, 0], # ok
+    [-203.12, 64.82, 1.01, 0, 90, 0], #ok
+
+    # straight scenarios
+
+    [-15.60, -161.00, 1.0, 0, 180, 0], #ok
+    [-185.95, -159.74, 1.0, 0, 0, 0], #ok
+    [-19.18, 57.56, 1.00, 0, 180, 0],  #ok
+    [-86.19, 57.56, 1.00, 0, 0, 0], #ok
+
+    # multiple-turn scenarios
+
+    [-23.86, -245.72,1.0, 0, 200, 0], #ok
+    # [-27.81, -95.85, 1.00, 0, 270, 0], #ok
+    
+    ]
+
+
+EGO_END_POINT = [
+    # one-turn scenarios
+    
+    [75.51, 51.44, 1.01,  0.953298, 140, 0.000000], #ok
+    [-90.68, 118.28, 1.01, 0, 180, 0], # ok
+    [72.92, 72.00, 1.01, 4.703701, -100, 0.000000], #ok
+    [-190.41, 110.6, 1.00, 0, 0, 0], #ok
+
+    # straight scenarios
+
+    [-58.60, -161.00, 1.0, 0, 180, 0], #ok
+    [-24.95, -158.74, 1.0, 0, 0, 0], #ok
+    [-82.18, 53.56, 1.00, 0, 180, 0],  #ok
+    [-22.19, 60.56, 1.00, 0, 0, 0], #ok
+
+    # multiple-turn scenarios
+
+    [-169.98, -248.17, 1.0, 0, 180, 0], #ok
+    # [-63.37, -95.85, 1.00, 0, 270, 0], #ok
+    
+    ]
+
 
 # DISCRETE_ACC = [0.0, 0.2, 0.4, 0.6, 1.0] # discrete value of accelerations
 DISCRETE_ACC = [0.0 , 0.3] # discrete value of accelerations
@@ -57,7 +95,6 @@ REWARD = {
           'time': 0.0,
           'destination_reached': 20.0,
           'early_lane_change': 0.0,
-          'speed': 0.5,
         }
 }
 
@@ -174,7 +211,12 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         # Setup blueprint library
         self.blueprint_library = self.world.get_blueprint_library()
 
-        self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+        # self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+
+        self._spawn_queue = deque(np.random.permutation(len(EGO_SPAWN_POINT)))
+        self.spawn_index = self._spawn_queue.popleft()
+
+
 
         self.ego_transform = carla.Transform(
             carla.Location(x = EGO_SPAWN_POINT[self.spawn_index][0], y = EGO_SPAWN_POINT[self.spawn_index][1], z = EGO_SPAWN_POINT[self.spawn_index][2]),
@@ -216,6 +258,9 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         self.R_goal = 200.0
         self.R_collision = 150.0   # moderate to avoid "always stop"
 
+        self._collision_step = False
+        self._lane_invasion_step = False
+
     def _hard_world_cleanup(self):
         actors = self.world.get_actors()
         victims = []
@@ -236,6 +281,12 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
             "collision": 1 if self.collision_detected else 0,
             "lane_invasion": 1 if self.lane_invasion_detected else 0,
         }
+    
+
+    def _next_spawn_index(self):
+        if not self._spawn_queue:
+            self._spawn_queue.extend(np.random.permutation(len(EGO_SPAWN_POINT)))
+        return self._spawn_queue.popleft()
     
 
     def compute_goal_reward(self, ag, dg, info):
@@ -304,6 +355,7 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         rgb = self._pull_latest_image(timeout=0.5)
         self.camera_image2 = rgb
         self.camera_image = cv2.resize(rgb, (128, 128), interpolation=cv2.INTER_AREA)
+
         ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
         dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
         return {
@@ -322,8 +374,12 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         self._hard_world_cleanup()
         self._clean_actors()
 
+        if not self._spawn_queue:
+            self._spawn_queue = deque(np.random.permutation(len(EGO_SPAWN_POINT)))
+        self.spawn_index = self._spawn_queue.popleft()
 
-        self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+
+        # self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
 
         self.ego_transform = carla.Transform(
             carla.Location(x = EGO_SPAWN_POINT[self.spawn_index][0], y = EGO_SPAWN_POINT[self.spawn_index][1], z = EGO_SPAWN_POINT[self.spawn_index][2]),
@@ -402,6 +458,10 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         self.speed_kmh = None
         self.previous_collisions = 0
         self.previous_lane_invasions = 0
+
+        self._collision_step = False
+        self._lane_invasion_step = False
+
         
 
         print("Environment reset")
@@ -499,6 +559,14 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         # 7. Compute reward
         reward, info_dict = self._compute_reward()
 
+        info_dict["collision_step"] = int(self._collision_step)
+        self._collision_step = False
+
+        info_dict["lane_invasion_step"] = int(self._lane_invasion_step)
+        self._lane_invasion_step = False
+
+        info_dict["off_center_m"] = abs(self.get_signed_lane_offset())
+
 
         # 4. Check termination
         done, terminal_info = self._check_termination()
@@ -532,7 +600,13 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
 
         # 7. show the image
         if self.camera_image2 is not None:
-            resized_image = cv2.resize(self.camera_image2, (512, 512), interpolation=cv2.INTER_LINEAR)
+            frame = self.camera_image2.copy()
+            hud_text = f"Spawn idx: {self.spawn_index}"
+            cv2.putText(frame, hud_text, (16, 40), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.1, (255, 255, 255), 2, cv2.LINE_AA)
+
+
+            resized_image = cv2.resize(frame, (512, 512), interpolation=cv2.INTER_LINEAR)
               
             cv2.imshow("EgoCamera", resized_image)
             cv2.waitKey(1)
@@ -561,6 +635,17 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
 
         self._clean_actors()
         pass
+
+    def get_signed_lane_offset(self) -> float:
+        loc = self.ego.get_location()
+        wp  = self.world.get_map().get_waypoint(
+            loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+        center = wp.transform.location
+        right  = wp.transform.get_right_vector()
+        # signed meters: right positive, left negative
+        v = np.array([loc.x - center.x, loc.y - center.y], np.float32)
+        r = np.array([right.x, right.y], np.float32)
+        return float(np.dot(v, r) / max(1e-6, np.linalg.norm(r)))
 
     # --------------------------------------------------------------------------
     # Setup Spaces
@@ -675,9 +760,13 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         self.collision_hist.append(event)
         self.collision_detected = True
 
+        self._collision_step = True 
+
     def lane_invasion_data(self, event):
         self.lane_invasion_hist.append(event)
         self.lane_invasion_detected = True
+
+        self._lane_invasion_step = True
 
     # --------------------------------------------------------------------------
     #Apply Control
@@ -755,37 +844,59 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         return angle_offset
     
     def _compute_reward(self):
-
-        total_reward = 0.0
-        reward_components = {}
-
-
-
-        # (A) Goal 
-        dist_goal = self.ego.get_location().distance(self.end_point.location)
-        
-
-        r_goal = 0.0
-        if dist_goal < 5.0:
-            r_goal = 200.0
-        
-        reward_components["goal"] = r_goal
-
-        total_reward = r_goal
-
-        collision     = self.collision_detected
-
-        if collision > 0:
-            total_reward -= 300
-            reward_components["collision"] = -300
-        else:
-            reward_components["collision"] = 0
-
         ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
         dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
 
-        total_reward += self.compute_goal_reward(ag[None], dg[None], reward_components)[0]
-        return total_reward, reward_components
+        success = float(np.linalg.norm(ag - dg) < self.goal_radius)
+        r = self.R_goal if success else 0.0
+
+        collided = bool(self.collision_detected)
+        if collided:
+            r -= self.R_collision
+
+
+
+
+        info = {
+            "success": success,
+            "collision": collided,
+        }
+        return float(r), info
+    
+    # Add to class CarlaLaneFollowingStudentEnv
+    
+    # def _compute_reward(self):
+
+    #     total_reward = 0.0
+    #     reward_components = {}
+
+
+
+    #     # (A) Goal 
+    #     dist_goal = self.ego.get_location().distance(self.end_point.location)
+        
+
+    #     r_goal = 0.0
+    #     if dist_goal < 5.0:
+    #         r_goal = 200.0
+        
+    #     reward_components["goal"] = r_goal
+
+    #     total_reward = r_goal
+
+    #     collision     = self.collision_detected
+
+    #     if collision > 0:
+    #         total_reward -= 300
+    #         reward_components["collision"] = -300
+    #     else:
+    #         reward_components["collision"] = 0
+
+    #     ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
+    #     dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
+
+    #     total_reward += self.compute_goal_reward(ag[None], dg[None], reward_components)[0]
+    #     return total_reward, reward_components
 
     # --------------------------------------------------------------------------
     # Termination Conditions
@@ -811,14 +922,20 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         """
         # --- gather episode facts ---------------------------------------------
         collision     = self.collision_detected
-        reached_goal  = self.ego.get_location().distance(self.end_point.location) < 2.0
+
+        ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
+        dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
+        reached_goal = float(np.linalg.norm(ag - dg) < self.goal_radius)
+        # reached_goal  = self.ego.get_location().distance(self.end_point.location) < 2.0
         time_exceeded = self._time_step >= self._max_time_step
 
         # low-speed: share the threshold with the reward code
         LOW_SPEED_KMH       = 1.0
         LOW_SPEED_TIMEOUT_S = 10.0
 
-        if self.speed_kmh < LOW_SPEED_KMH:
+        # if self.speed_kmh < LOW_SPEED_KMH:
+        spd = float(self.speed_kmh) if self.speed_kmh is not None else LOW_SPEED_KMH + 1.0
+        if spd < LOW_SPEED_KMH:
             if self.low_speed_start_time is None:
                 self.low_speed_start_time = time.time()
         else:
