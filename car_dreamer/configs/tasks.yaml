@@ -668,3 +668,69 @@ carla_overtake_test:
     decoder.cnn_keys: "image"
     decoder.cnn_kernels: [5, 5, 5, 6, 6]
     train.log_keys_video: [image]
+
+carla_overtake_student:
+  env:
+    name: CarlaOvertakeStudentEnv-v0
+    observation.enabled: [image, collision, lane_invasion]
+    num_vehicles: 50
+
+  reward:
+    desired_speed: 4 # desired speed (m/s)
+    scales:
+      {
+        waypoint: 2.0,
+        speed: 0.5,
+        collision: 30.0,
+        out_of_lane: 3.0,
+        time: 0.0,
+        destination_reached: 20.0,
+      }
+
+  terminal:
+    time_limit: 500 # maximum timesteps per episode
+    out_lane_thres: 3 # threshold for out of lane
+
+  dreamerv3:
+    encoder.cnn_keys: "image"
+    decoder.cnn_keys: "image"
+    run.log_keys_video: [image]
+
+  dreamerv2:
+    encoder.cnn_keys: "image"
+    decoder.cnn_keys: "image"
+    decoder.cnn_kernels: [5, 5, 5, 6, 6]
+    train.log_keys_video: [image]
+
+carla_overtake_student_test:
+  env:
+    name: CarlaOvertakeStudentTestEnv-v0
+    observation.enabled: [image, collision, lane_invasion]
+    num_vehicles: 50
+
+  reward:
+    desired_speed: 4 # desired speed (m/s)
+    scales:
+      {
+        waypoint: 2.0,
+        speed: 0.5,
+        collision: 30.0,
+        out_of_lane: 3.0,
+        time: 0.0,
+        destination_reached: 20.0,
+      }
+
+  terminal:
+    time_limit: 500 # maximum timesteps per episode
+    out_lane_thres: 3 # threshold for out of lane
+
+  dreamerv3:
+    encoder.cnn_keys: "image"
+    decoder.cnn_keys: "image"
+    run.log_keys_video: [image]
+
+  dreamerv2:
+    encoder.cnn_keys: "image"
+    decoder.cnn_keys: "image"
+    decoder.cnn_kernels: [5, 5, 5, 6, 6]
+    train.log_keys_video: [image]

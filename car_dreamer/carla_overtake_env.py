@@ -1106,6 +1106,28 @@ class CarlaOvertakeEnv(gym.Env):
             if dot_current > dot_goal:
                 past_goal = True
 
+        # Out of lane bounding box logic (if you want a simple check)
+        # E.g. if ego’s x is beyond left/right boundary
+        ego_loc = self.ego.get_transform().location
+            
+        out_of_lane = False
+
+        if EGO_SPAWN_POINT[self.spawn_index][0] == -16.890745162963867:
+            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 2.5
+            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 4.5
+        elif EGO_SPAWN_POINT[self.spawn_index][0] == -13.395880699157715:
+            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
+            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 3.5
+        elif EGO_SPAWN_POINT[self.spawn_index][0] == -9.890790939331055:
+            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
+            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 3.5
+        elif EGO_SPAWN_POINT[self.spawn_index][0] == -6.395920276641846:
+            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
+            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 2.5
+
+        if ego_loc.x < left_bound or ego_loc.x > right_bound:
+            out_of_lane = True
+
         # --- decide outcome ----------------------------------------------------
         info = {}
         terminated = False
@@ -1133,6 +1155,18 @@ class CarlaOvertakeEnv(gym.Env):
             terminated = True          # Gymnasium’s “time-limit”
             info["time_exceeded"] = True
             info["elapsed_steps"] = self._time_step
+
+        elif out_of_lane:
+            terminated = True
+            info["out_of_lane"] = True
+
+        # if the distance between the two vehicles is too long, reset the scenario
+        ego_x, ego_y = self.get_vehicle_pos(self.ego)
+
+        if self.nonego is not None and self.nonego.is_alive:
+            pass
+        else:
+            self.reset_other_vehicles()
 
         return terminated , info
 
