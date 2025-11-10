@@ -99,7 +99,7 @@ def main(argv=None):
 
     expert = embodied.Checkpoint(logdir / "teacher.ckpt")
     timer.wrap("expert", expert, ["save", "load"])
-    expert.step = step
+    # expert.step = step
     expert.agent = teacher_agent
     expert.replay = teacher_replay
     expert.load()  

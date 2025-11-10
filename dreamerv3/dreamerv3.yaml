@@ -174,11 +174,26 @@ defaults:
       dist_deter_imagined: 1.0,
       dist_stoch_imagined: 1.0,
       posterior_kl: 5.0,
-      prior_kl: 5.0
+      prior_kl: 5.0,
       bisim_pair: 0.5   # start in [0.25, 1.0]      
     }
 
-  bisim_gamma: 0.99
+  # --- bisimulation target (teacher) ---
+  bisim_mode: "multi"          # {"single","multi"}; "multi" turns on the K-action aggregator
+  bisim_K_actions: 3           # number of candidate actions K (>=1). K=1 ~= "single"
+  bisim_agg: "softmax"         # {"softmax","max","mean"}
+  bisim_tau: 0.5               # temperature for softmax aggregator (ignored for max/mean)
+
+  # --- multi-step rollout for the transition gap ---
+  bisim_ms_horizon: 3          # H: steps of teacher img_step to include (>=1)
+  bisim_ms_discount: 0.99      # discount for gaps across steps 1..H
+
+  # --- action generation for continuous spaces ---
+  bisim_delta: 0.25            # magnitude of +/- perturbation
+  bisim_steer_dim: 0           # index of the steering dim (for continuous actions)
+
+  # --- existing weights (keep yours if present) ---
+  bisim_gamma: 0.99            # weights transition term inside d_T
   bisim_alpha_r: 1.0
   bisim_w_deter: 1.0
   bisim_w_stoch: 1.0
