@@ -175,8 +175,15 @@ defaults:
       dist_stoch_imagined: 1.0,
       posterior_kl: 5.0,
       prior_kl: 5.0
-      
+      bisim_pair: 0.5   # start in [0.25, 1.0]      
     }
+
+  bisim_gamma: 0.99
+  bisim_alpha_r: 1.0
+  bisim_w_deter: 1.0
+  bisim_w_stoch: 1.0
+
+
   dyn_loss: { impl: kl, free: 1.0 }
   rep_loss: { impl: kl, free: 1.0 }
   model_opt:
