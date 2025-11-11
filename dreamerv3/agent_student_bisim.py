@@ -507,15 +507,32 @@ class WorldModel(nj.Module):
 
 
         # 4) Teacher bisimulation target d_T(i,j)
-        if "reward" in teacher_data:
-            r_T = teacher_data["reward"]
-            if r_T.ndim == 3 and r_T.shape[-1] == 1:
-                r_T = r_T[..., 0]                                 # [T,B]
-            dr = jnp.abs(r_T - r_T[:, perm])                      # [T,B]
-        else:
-            t_feats = {**teacher_post, "embed": teacher_embed}
-            r_pred = self.teacher_wm.heads["reward"](jax.lax.stop_gradient(t_feats)).mean()[..., 0]  # [T,B]
-            dr = jnp.abs(r_pred - r_pred[:, perm])
+        # if "reward" in teacher_data:
+        #     r_T = teacher_data["reward"]
+        #     if r_T.ndim == 3 and r_T.shape[-1] == 1:
+        #         r_T = r_T[..., 0]                                 # [T,B]
+        #     dr = jnp.abs(r_T - r_T[:, perm])                      # [T,B]
+        # else:
+        #     t_feats = {**teacher_post, "embed": teacher_embed}
+        #     r_pred = self.teacher_wm.heads["reward"](jax.lax.stop_gradient(t_feats)).mean()[..., 0]  # [T,B]
+        #     dr = jnp.abs(r_pred - r_pred[:, perm])
+
+        t_feats = {**teacher_post, "embed": teacher_embed}
+        r_pred = self.teacher_wm.heads["reward"](jax.lax.stop_gradient(t_feats)).mean()
+
+        # Normalize shape to [T, B] for downstream indexing
+        if r_pred.ndim == 3 and r_pred.shape[-1] == 1:
+            r_pred = r_pred[..., 0]                      # [T, B]
+        elif r_pred.ndim == 1:
+            r_pred = r_pred.reshape(T, B)                # [T*B] -> [T, B]
+        elif r_pred.ndim != 2:
+            r_pred = r_pred.reshape(T, B)                # any odd case -> [T, B]
+
+        # Use jnp.take to avoid advanced-indexing pitfalls
+        r_pred_perm = jnp.take(r_pred, perm, axis=1)     # [T, B]
+        dr = jnp.abs(r_pred - r_pred_perm)               # [T, B]
+        # dr     = jnp.abs(r_pred - r_pred[:, perm])
+
 
         #########################################################################################
         # ----------------- BEGIN PATCH: multi-action + multi-step bisimulation -----------------
