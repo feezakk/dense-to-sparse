@@ -441,42 +441,72 @@ class WorldModel(nj.Module):
         student_deter = post["deter"]   # shape (16, 64, 4096)
         student_stoch = post["stoch"]   # shape (16, 64, 32, 32)
 
-        total_kl = 0
-        N = student_stoch.shape[2]  # e.g. 32
-        for i in range(N):  # e.g. 32
-            teacher_probs_i = jax.nn.softmax(teacher_stoch[:, :, i, :], axis=-1) 
-            student_probs_i = jax.nn.softmax(student_stoch[:, :, i, :], axis=-1)
+        ##########################################################################################
 
-            teacher_dist_i = distrax.Categorical(probs=teacher_probs_i)
-            student_dist_i = distrax.Categorical(probs=student_probs_i)
+        # total_kl = 0
+        # N = student_stoch.shape[2]  # e.g. 32
+        # for i in range(N):  # e.g. 32
+        #     teacher_probs_i = jax.nn.softmax(teacher_stoch[:, :, i, :], axis=-1) 
+        #     student_probs_i = jax.nn.softmax(student_stoch[:, :, i, :], axis=-1)
 
-            kl_i = teacher_dist_i.kl_divergence(student_dist_i)  
-            total_kl += kl_i  
+        #     teacher_dist_i = distrax.Categorical(probs=teacher_probs_i)
+        #     student_dist_i = distrax.Categorical(probs=student_probs_i)
 
-        losses["posterior_stoch_kl"] = jnp.mean(total_kl)
-        losses["posterior_deter_kl"] = jnp.mean((teacher_deter - student_deter) ** 2)
+        #     kl_i = teacher_dist_i.kl_divergence(student_dist_i)  
+        #     total_kl += kl_i  
 
-        teacher_deter = teacher_prior["deter"]   # shape (16, 64, 4096)
-        teacher_stoch = teacher_prior["stoch"]   # shape (16, 64, 32, 32)
+        # losses["posterior_stoch_kl"] = jnp.mean(total_kl)
+        # losses["posterior_deter_kl"] = jnp.mean((teacher_deter - student_deter) ** 2)  
 
-        student_deter = prior["deter"]   # shape (16, 64, 4096)
-        student_stoch = prior["stoch"]   # shape (16, 64, 32, 32)
+        # teacher_deter = teacher_prior["deter"]   # shape (16, 64, 4096)
+        # teacher_stoch = teacher_prior["stoch"]   # shape (16, 64, 32, 32)
 
-        losses["prior_deter_kl"] = jnp.mean((teacher_deter - student_deter) ** 2)
+        # student_deter = prior["deter"]   # shape (16, 64, 4096)
+        # student_stoch = prior["stoch"]   # shape (16, 64, 32, 32)
+
+        # losses["prior_deter_kl"] = jnp.mean((teacher_deter - student_deter) ** 2)
         
-        total_kl = 0
-        N = student_stoch.shape[2]  # e.g. 32
-        for i in range(N):  # e.g. 32
-            teacher_probs_i = jax.nn.softmax(teacher_stoch[:, :, i, :], axis=-1) 
-            student_probs_i = jax.nn.softmax(student_stoch[:, :, i, :], axis=-1)
+        # total_kl = 0
+        # N = student_stoch.shape[2]  # e.g. 32
+        # for i in range(N):  # e.g. 32
+        #     teacher_probs_i = jax.nn.softmax(teacher_stoch[:, :, i, :], axis=-1) 
+        #     student_probs_i = jax.nn.softmax(student_stoch[:, :, i, :], axis=-1)
 
-            teacher_dist_i = distrax.Categorical(probs=teacher_probs_i)
-            student_dist_i = distrax.Categorical(probs=student_probs_i)
+        #     teacher_dist_i = distrax.Categorical(probs=teacher_probs_i)
+        #     student_dist_i = distrax.Categorical(probs=student_probs_i)
 
-            kl_i = teacher_dist_i.kl_divergence(student_dist_i)  # shape [T,B]
-            total_kl += kl_i  # Sum over factors
+        #     kl_i = teacher_dist_i.kl_divergence(student_dist_i)  # shape [T,B]
+        #     total_kl += kl_i  # Sum over factors
 
-        losses["prior_stoch_kl"] = jnp.mean(total_kl)
+        # losses["prior_stoch_kl"] = jnp.mean(total_kl)
+
+        ################################################################################
+
+        # Posterior (teacher_post vs post)
+        t_probs_post = self.teacher_wm.rssm.get_dist({"logit": teacher_post["logit"]})  # [T,B,G,C]
+        s_probs_post = self.rssm.get_dist({"logit": post["logit"]})                     # [T,B,G,C]
+        # posterior_kl_per_group = jnp.sum(
+        #     t_probs_post * (jnp.log(t_probs_post + EPS) - jnp.log(s_probs_post + EPS)),
+        #     axis=-1,  # over C
+        # )  # [T,B,G]
+
+        posterior_kl_per_group = t_probs_post.kl_divergence(s_probs_post)
+
+
+        losses["posterior_stoch_kl"] = posterior_kl_per_group.mean()
+        losses["posterior_deter_kl"] = jnp.mean((teacher_post["deter"] - post["deter"]) ** 2)
+
+        # Prior (teacher_prior vs prior)
+        t_probs_prior = self.teacher_wm.rssm.get_dist({"logit": teacher_prior["logit"]})
+        s_probs_prior = self.rssm.get_dist({"logit": prior["logit"]})
+        # prior_kl_per_group = jnp.sum(
+        #     t_probs_prior * (jnp.log(t_probs_prior + EPS) - jnp.log(s_probs_prior + EPS)),
+        #     axis=-1,
+        # )  # [T,B,G]
+
+        prior_kl_per_group = t_probs_prior.kl_divergence(s_probs_prior)
+        losses["prior_stoch_kl"] = prior_kl_per_group.mean()
+        losses["prior_deter_kl"] = jnp.mean((teacher_prior["deter"] - prior["deter"]) ** 2)
 
         ####################################################################################
         # ---- Bisimulation-style pairwise loss (teacher-targeted, student embedding) ----
