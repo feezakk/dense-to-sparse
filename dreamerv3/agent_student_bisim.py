@@ -272,13 +272,42 @@ class Agent(nj.Module):
 #         return scale * gap + bias
 #         # return self.scale * gap + self.bias
 
+# class BisimCalib(nj.Module):
+#     def __init__(self, name="bisim_calib"):
+#         self._raw_scale = nj.Variable(jnp.zeros, (), jnp.float32, name="raw_scale")
+#         self._bias      = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
+#     def __call__(self, gap):
+#         scale = jax.nn.softplus(self._raw_scale.read()) + 1e-4
+#         bias  = jnp.maximum(self._bias.read(), 0.0)
+#         return scale * gap + bias
+    
+# class BisimCalib(nj.Module):
+#     def __init__(self, name="bisim_calib"):
+#         self.scale = nj.Variable(jnp.ones, (), jnp.float32, name="scale")
+#         self.bias = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
+#         self.scale.read()  # ensure state entry exists during create pass
+#         self.bias.read()
+
+#     def __call__(self, gap):
+#         scale = self.scale.read()
+#         bias = self.bias.read()
+#         return scale * gap + bias
+    
+
 class BisimCalib(nj.Module):
     def __init__(self, name="bisim_calib"):
-        self._raw_scale = nj.Variable(jnp.zeros, (), jnp.float32, name="raw_scale")
-        self._bias      = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
+        self.scale = nj.Variable(jnp.ones, (), jnp.float32, name="scale")
+        self.bias = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
+
+    def ensure_initialized(self):
+        if nj.creating():
+            self.scale.read()
+            self.bias.read()
+
     def __call__(self, gap):
-        scale = jax.nn.softplus(self._raw_scale.read()) + 1e-4
-        bias  = jnp.maximum(self._bias.read(), 0.0)
+        self.ensure_initialized()
+        scale = self.scale.read()
+        bias = self.bias.read()
         return scale * gap + bias
 
 class WorldModel(nj.Module):
@@ -446,6 +475,22 @@ class WorldModel(nj.Module):
         w_deter     = getattr(self.config, "bisim_w_deter", 1.0)
         w_stoch     = getattr(self.config, "bisim_w_stoch", 1.0)
 
+
+        # --- helper: sample teacher actions for a [T,B,...] latent block ---
+        def _sample_teacher_actions_TB(latents_TB, key):
+            """
+            latents_TB: dict with keys 'deter', 'stoch' shaped [T, B, ...]
+            Returns: actions [T, B, A] sampled from π_T(·|latents_TB)
+            """
+            T_, B_ = latents_TB["deter"].shape[:2]
+            flat = jax.tree_map(lambda x: x.reshape((T_ * B_,) + x.shape[2:]), latents_TB)
+            # stop grads to the teacher policy and teacher WM
+            flat = sg(flat)
+            outs, _ = self.teacher_policy(flat, None)            # outs["action"] is a distrax dist
+            a_flat = outs["action"].sample(seed=key)             # [T*B, A]
+            return a_flat.reshape((T_, B_, -1))                  # [T, B, A]
+        
+
         # 1) Teacher "next-latent" (one-step prior)
         t_deter = teacher_prior["deter"]                          # [T,B,Dd]
         t_probs = jax.nn.softmax(teacher_prior["stoch"], -1)      # [T,B,G,C]
@@ -510,13 +555,31 @@ class WorldModel(nj.Module):
             return jax.tree_map(lambda x: x.reshape(prev_latent["deter"].shape[:2] + x.shape[1:]), nxt_flat)
 
         # One-step baseline via img_step from teacher_post using the executed action at t
-        tpost_i, tpost_j = teacher_post, jax.tree_map(lambda x: x[:, perm], teacher_post)
-        nxt_i = _img_step_all(self.teacher_wm.rssm, tpost_i, teacher_data["action"][:T])  # [T,B,...]
-        nxt_j = _img_step_all(self.teacher_wm.rssm, tpost_j, teacher_data["action"][:T])
+        # tpost_i, tpost_j = teacher_post, jax.tree_map(lambda x: x[:, perm], teacher_post)
+        # nxt_i = _img_step_all(self.teacher_wm.rssm, tpost_i, teacher_data["action"][:T])  # [T,B,...]
+        # nxt_j = _img_step_all(self.teacher_wm.rssm, tpost_j, teacher_data["action"][:T])
 
-        deter_gap_1 = jnp.linalg.norm(nxt_i["deter"] - nxt_j["deter"], axis=-1)             # [T,B]
-        stoch_gap_1 = js_divergence(jax.nn.softmax(nxt_i["stoch"], -1),
-                                    jax.nn.softmax(nxt_j["stoch"], -1)).mean(axis=-1)       # [T,B]
+        # deter_gap_1 = jnp.linalg.norm(nxt_i["deter"] - nxt_j["deter"], axis=-1)             # [T,B]
+        # stoch_gap_1 = js_divergence(jax.nn.softmax(nxt_i["stoch"], -1),
+        #                             jax.nn.softmax(nxt_j["stoch"], -1)).mean(axis=-1)       # [T,B]
+
+        # One-step under π_T (policy-conditional): each branch samples its own a ~ π_T(·|s)
+        tpost_i = teacher_post
+        tpost_j = jax.tree_map(lambda x: x[:, perm], teacher_post)
+
+        k_i, k_j = jax.random.split(nj.rng())
+        a_i_1 = _sample_teacher_actions_TB(tpost_i, k_i)  # [T,B,A]
+        a_j_1 = _sample_teacher_actions_TB(tpost_j, k_j)  # [T,B,A]
+
+        nxt_i = _img_step_all(self.teacher_wm.rssm, tpost_i, a_i_1)  # [T,B,...]
+        nxt_j = _img_step_all(self.teacher_wm.rssm, tpost_j, a_j_1)
+
+        deter_gap_1 = jnp.linalg.norm(nxt_i["deter"] - nxt_j["deter"], axis=-1)  # [T,B]
+        stoch_gap_1 = js_divergence(
+            jax.nn.softmax(nxt_i["stoch"], -1),
+            jax.nn.softmax(nxt_j["stoch"], -1)
+        ).mean(axis=-1)  # [T,B]
+
 
         # --- Multi-step machinery works on T_eff so we can look ahead H steps ---
         T = t_deter.shape[0]
@@ -526,10 +589,10 @@ class WorldModel(nj.Module):
         teacher_post_perm_eff = jax.tree_map(lambda x: x[:T_eff, perm], teacher_post)
         # Teacher action sequence for the next H steps
         # actions_seq[h] = teacher_data["action"][h:h+T_eff]  -> shape [H, T_eff, B, A]
-        actions_seq = []
-        for h in range(H):
-            actions_seq.append(teacher_data["action"][h:h+T_eff].astype(jnp.float32))
-        actions_seq = jnp.stack(actions_seq, axis=0)  # [H, T_eff, B, A]
+        # actions_seq = []
+        # for h in range(H):
+        #     actions_seq.append(teacher_data["action"][h:h+T_eff].astype(jnp.float32))
+        # actions_seq = jnp.stack(actions_seq, axis=0)  # [H, T_eff, B, A]
 
         def _decode(flat_idx, n_steer):
             acc = flat_idx // n_steer
@@ -582,57 +645,102 @@ class WorldModel(nj.Module):
                     cand.append(jnp.clip(base + eps, -1.0, 1.0))
                 return jnp.stack(cand[:K], axis=0)  # [K, T_eff, B, A]
 
-        def _rollout_gap_for_actionsK(actionsK_first_step):
-            """
-            actionsK_first_step: [K,T_eff,B,A/C] candidates for step-0 only.
-            Build full H-step sequences by replacing actions_seq[0] with candidate then
-            roll H steps with teacher RSSM; compute discounted gap across steps; aggregate over K.
-            """
-            # For each candidate k, build full action sequence [H,T_eff,B,A]
-            def seq_for_k(a0_k):
-                return actions_seq.at[0].set(a0_k)  # replace step-0 with candidate
+        # def _rollout_gap_for_actionsK(actionsK_first_step):
+        #     """
+        #     actionsK_first_step: [K,T_eff,B,A/C] candidates for step-0 only.
+        #     Build full H-step sequences by replacing actions_seq[0] with candidate then
+        #     roll H steps with teacher RSSM; compute discounted gap across steps; aggregate over K.
+        #     """
+        #     # For each candidate k, build full action sequence [H,T_eff,B,A]
+        #     def seq_for_k(a0_k):
+        #         return actions_seq.at[0].set(a0_k)  # replace step-0 with candidate
 
-            def gap_for_k(a0_k):
-                seq = seq_for_k(a0_k)                  # [H,T_eff,B,A]
-                lat_i = teacher_post_eff
-                lat_j = teacher_post_perm_eff
-                det_gaps = []
-                st_gaps = []
-                for h in range(H):
-                    lat_i = _img_step_all(self.teacher_wm.rssm, lat_i, seq[h])       # next at step h+1
-                    lat_j = _img_step_all(self.teacher_wm.rssm, lat_j, seq[h])
-                    det_gaps.append(jnp.linalg.norm(lat_i["deter"] - lat_j["deter"], axis=-1))  # [T_eff,B]
-                    st_gaps.append(js_divergence(jax.nn.softmax(lat_i["stoch"], -1),
-                                                jax.nn.softmax(lat_j["stoch"], -1)).mean(axis=-1))  # [T_eff,B]
-                det_gaps = jnp.stack(det_gaps, axis=0)  # [H,T_eff,B]
-                st_gaps  = jnp.stack(st_gaps,  axis=0)  # [H,T_eff,B]
-                # discounted sum over steps 1..H
-                h_w = (ms_gamma ** jnp.arange(1, H + 1)).reshape(H, 1, 1)
-                det_sum = (h_w * det_gaps).sum(axis=0)  # [T_eff,B]
-                st_sum  = (h_w * st_gaps).sum(axis=0)   # [T_eff,B]
-                return w_deter * det_sum + w_stoch * st_sum  # [T_eff,B]
+        #     def gap_for_k(a0_k):
+        #         seq = seq_for_k(a0_k)                  # [H,T_eff,B,A]
+        #         lat_i = teacher_post_eff
+        #         lat_j = teacher_post_perm_eff
+        #         det_gaps = []
+        #         st_gaps = []
+        #         for h in range(H):
+        #             lat_i = _img_step_all(self.teacher_wm.rssm, lat_i, seq[h])       # next at step h+1
+        #             lat_j = _img_step_all(self.teacher_wm.rssm, lat_j, seq[h])
+        #             det_gaps.append(jnp.linalg.norm(lat_i["deter"] - lat_j["deter"], axis=-1))  # [T_eff,B]
+        #             st_gaps.append(js_divergence(jax.nn.softmax(lat_i["stoch"], -1),
+        #                                         jax.nn.softmax(lat_j["stoch"], -1)).mean(axis=-1))  # [T_eff,B]
+        #         det_gaps = jnp.stack(det_gaps, axis=0)  # [H,T_eff,B]
+        #         st_gaps  = jnp.stack(st_gaps,  axis=0)  # [H,T_eff,B]
+        #         # discounted sum over steps 1..H
+        #         h_w = (ms_gamma ** jnp.arange(1, H + 1)).reshape(H, 1, 1)
+        #         det_sum = (h_w * det_gaps).sum(axis=0)  # [T_eff,B]
+        #         st_sum  = (h_w * st_gaps).sum(axis=0)   # [T_eff,B]
+        #         return w_deter * det_sum + w_stoch * st_sum  # [T_eff,B]
 
-            gaps = jax.vmap(gap_for_k)(actionsK_first_step)  # [K,T_eff,B]
-            if agg == "max":
-                return jnp.max(gaps, axis=0)                 # [T_eff,B]
-            elif agg == "mean":
-                return jnp.mean(gaps, axis=0)                # [T_eff,B]
+        #     gaps = jax.vmap(gap_for_k)(actionsK_first_step)  # [K,T_eff,B]
+        #     if agg == "max":
+        #         return jnp.max(gaps, axis=0)                 # [T_eff,B]
+        #     elif agg == "mean":
+        #         return jnp.mean(gaps, axis=0)                # [T_eff,B]
+        #     else:
+        #         return jax.scipy.special.logsumexp(gaps / tau, axis=0) * tau  # [T_eff,B]
+
+                # --- multi-step under π_T: at each step sample a_i ~ π_T(·|s_i^h), a_j ~ π_T(·|s_j^h) ---
+        def _rollout_gap_piT(lat_i0, lat_j0, H_):
+            lat_i, lat_j = lat_i0, lat_j0
+            det_gaps, st_gaps = [], []
+            for h in range(H_):
+                kk_i, kk_j = jax.random.split(nj.rng())
+                a_i_h = _sample_teacher_actions_TB(lat_i, kk_i)                 # [T_eff,B,A]
+                a_j_h = _sample_teacher_actions_TB(lat_j, kk_j)
+                lat_i = _img_step_all(self.teacher_wm.rssm, lat_i, a_i_h)       # next latents
+                lat_j = _img_step_all(self.teacher_wm.rssm, lat_j, a_j_h)
+                det_gaps.append(jnp.linalg.norm(lat_i["deter"] - lat_j["deter"], axis=-1))
+                st_gaps.append(js_divergence(
+                    jax.nn.softmax(lat_i["stoch"], -1),
+                    jax.nn.softmax(lat_j["stoch"], -1)
+                ).mean(axis=-1))
+            det_gaps = jnp.stack(det_gaps, axis=0)  # [H_, T_eff, B]
+            st_gaps  = jnp.stack(st_gaps,  axis=0)  # [H_, T_eff, B]
+            h_w = (ms_gamma ** jnp.arange(1, H_ + 1)).reshape(H_, 1, 1)
+            return (h_w * (w_deter * det_gaps + w_stoch * st_gaps)).sum(axis=0)  # [T_eff,B]
+
+
+        # if (mode == "multi") and (K_actions > 1):
+        #     base0_eff = actions_seq[0][:T_eff]                                   # [T_eff,B,A/C]
+        #     actionsK  = _build_actions_K(base0_eff, K_actions)           # [K,T_eff,B,A/C]
+        #     trans_gap_eff = _rollout_gap_for_actionsK(actionsK)          # [T_eff,B]
+        #     # For positions where multi-step cannot be computed (last H-1 steps), fall back to one-step
+        #     # Build a full [T,B] trans_gap by concatenation
+        #     trans_gap = jnp.concatenate([
+        #         trans_gap_eff,
+        #         (w_deter * deter_gap_1 + w_stoch * stoch_gap_1)[T_eff:]
+        #     ], axis=0)  # [T,B]
+        # else:
+        #     # single-action, one-step gap (your original)
+        #     trans_gap = w_deter * deter_gap_1 + w_stoch * stoch_gap_1    # [T,B]
+
+        if (mode == "multi"):
+            # Slice to the part where an H-step lookahead fits.
+            teacher_post_eff        = jax.tree_map(lambda x: x[:T_eff], teacher_post)
+            teacher_post_perm_eff   = jax.tree_map(lambda x: x[:T_eff, perm], teacher_post)
+
+            if K_actions > 1:
+                # Monte Carlo expectation under π_T using K independent rollouts
+                keys = jax.random.split(nj.rng(), K_actions)
+                trans_gap_eff = jax.vmap(lambda _k:
+                    _rollout_gap_piT(teacher_post_eff, teacher_post_perm_eff, H_eff)
+                )(keys).mean(axis=0)  # [T_eff,B]
             else:
-                return jax.scipy.special.logsumexp(gaps / tau, axis=0) * tau  # [T_eff,B]
+                trans_gap_eff = _rollout_gap_piT(teacher_post_eff, teacher_post_perm_eff, H_eff)
 
-        if (mode == "multi") and (K_actions > 1):
-            base0_eff = actions_seq[0][:T_eff]                                   # [T_eff,B,A/C]
-            actionsK  = _build_actions_K(base0_eff, K_actions)           # [K,T_eff,B,A/C]
-            trans_gap_eff = _rollout_gap_for_actionsK(actionsK)          # [T_eff,B]
-            # For positions where multi-step cannot be computed (last H-1 steps), fall back to one-step
-            # Build a full [T,B] trans_gap by concatenation
+            # For the trailing T - T_eff positions, fall back to the π_T one-step estimate
             trans_gap = jnp.concatenate([
                 trans_gap_eff,
                 (w_deter * deter_gap_1 + w_stoch * stoch_gap_1)[T_eff:]
             ], axis=0)  # [T,B]
         else:
-            # single-action, one-step gap (your original)
-            trans_gap = w_deter * deter_gap_1 + w_stoch * stoch_gap_1    # [T,B]
+            # single-step policy-conditional
+            trans_gap = w_deter * deter_gap_1 + w_stoch * stoch_gap_1  # [T,B]
+
 
         # Build the teacher bisimulation target
         dT = alpha_r * dr + gamma_bisim * trans_gap                      # [T,B]
@@ -770,10 +878,10 @@ class WorldModel(nj.Module):
         # metrics["bisim_K"]         = jnp.array(float(K_actions))
         # metrics["bisim_ms_H"]      = jnp.array(float(H))
 
-        metrics["bisim_phi_gap_mean"] = x.mean()
-        metrics["bisim_phi_gap_std"]  = x.std()
-        metrics["bisim_target_mean"]  = y.mean()
-        metrics["bisim_target_std"]   = y.std()
+        # metrics["bisim_phi_gap_mean"] = x.mean()
+        # metrics["bisim_phi_gap_std"]  = x.std()
+        # metrics["bisim_target_mean"]  = y.mean()
+        # metrics["bisim_target_std"]   = y.std()
         # metrics["bisim_scale"] = self.bisim_scale.value
         # metrics["bisim_bias"]  = self.bisim_bias.value
         # metrics["bisim_scale"] = jnp.asarray(self.bisim_scale, jnp.float32)
@@ -781,8 +889,13 @@ class WorldModel(nj.Module):
         # metrics["bisim_scale"] = jnp.asarray(self.bisim_calib.scale, jnp.float32)
         # metrics["bisim_bias"]  = jnp.asarray(self.bisim_calib.bias,  jnp.float32)
 
-        metrics["bisim_scale"] = self.bisim_calib.scale.read()
-        metrics["bisim_bias"] = self.bisim_calib.bias.read()
+        # metrics["bisim_scale"] = self.bisim_calib.scale.read()
+        # metrics["bisim_bias"] = self.bisim_calib.bias.read()
+
+        scale_eff = jax.nn.softplus(self.bisim_calib.scale.read()) + 1e-4
+        bias_eff  = jnp.maximum(self.bisim_calib.bias.read(), 0.0)
+        metrics["bisim_scale"] = scale_eff
+        metrics["bisim_bias"]  = bias_eff
 
 
         metrics.update(jaxutils_student.tensorstats(bisim_pair_loss, "bisim_pair"))  
