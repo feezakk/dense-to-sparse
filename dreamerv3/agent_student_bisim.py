@@ -259,7 +259,27 @@ class Agent(nj.Module):
         #         pass
         # # obs["teacher_action"] = obs["action"].astype(jnp.float32)
         return obs
+    
+# class BisimCalib(nj.Module):
+#     def __init__(self, name="bisim_calib"):
+#         self.scale = nj.Variable(jnp.ones, (), jnp.float32, name="scale")
+#         self.bias  = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
+#         # self.scale = nj.Param(jnp.ones([], jnp.float32), name="scale")
+#         # self.bias  = nj.Param(jnp.zeros([], jnp.float32), name="bias")
+#     def __call__(self, gap):
+#         scale = self.scale.read()
+#         bias = self.bias.read()
+#         return scale * gap + bias
+#         # return self.scale * gap + self.bias
 
+class BisimCalib(nj.Module):
+    def __init__(self, name="bisim_calib"):
+        self._raw_scale = nj.Variable(jnp.zeros, (), jnp.float32, name="raw_scale")
+        self._bias      = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
+    def __call__(self, gap):
+        scale = jax.nn.softplus(self._raw_scale.read()) + 1e-4
+        bias  = jnp.maximum(self._bias.read(), 0.0)
+        return scale * gap + bias
 
 class WorldModel(nj.Module):
     def __init__(self, obs_space, act_space, teacher_wm, teacher_policy, start, context, config):
@@ -272,7 +292,6 @@ class WorldModel(nj.Module):
         self.config = config
         shapes = {k: tuple(v.shape) for k, v in obs_space.items()}
         shapes = {k: v for k, v in shapes.items() if not k.startswith("log_")}
-        # print("config.encoder:", **config.encoder)
         self.encoder = nets_student.MultiEncoder(shapes, **config.encoder, name="enc")
         self.rssm = nets_student.RSSM(**config.rssm, name="rssm")
 
@@ -280,24 +299,9 @@ class WorldModel(nj.Module):
 
         self.heads = {
             "decoder": nets_student.MultiDecoder(dec_shapes, **config.decoder, name="dec"),
-            # "teacher_action": nets_student.MLP(shape=act_space["action"].shape, **config.teacher_head, name="teacher_action"),
             "reward": nets_student.MLP((), **config.reward_head, name="rew"),
-            "cont": nets_student.MLP((), **config.cont_head, name="cont"),
-            
+            "cont": nets_student.MLP((), **config.cont_head, name="cont"),     
         }
-
-        # print(act_space)
-
-        # self.actor = nets_student.MLP(
-        #     name="actor",
-        #     dims="deter",
-        #     shape=act_space["action"].shape,
-        #     **config.actor,
-        #     dist=config.actor_dist_disc,
-        # )
-
-        # self.policy = lambda s: self.actor(sg(s)).sample(seed=nj.rng())
-
 
         self.opt = jaxutils_student.Optimizer(name="model_opt", **config.model_opt)
         scales = self.config.loss_scales.copy()
@@ -306,6 +310,27 @@ class WorldModel(nj.Module):
         scales.update({k: vector for k in self.heads["decoder"].mlp_shapes})
         self.scales = scales
 
+        ####################################################################################################
+        # Bisim specific modules and variables
+        ####################################################################################################
+        
+        # self.bisim_scale = nj.Variable(jnp.ones([], jnp.float32),  name="bisim_scale")
+        # self.bisim_bias  = nj.Variable(jnp.zeros([], jnp.float32), name="bisim_bias")
+        # self.dT_ema      = nj.Variable(jnp.ones([], jnp.float32),  name="dT_ema")
+
+        self.dT_ema = nj.Variable(jnp.ones, (), jnp.float32, name="dT_ema")
+
+        self.phi_head = nets_student.MLP(
+            name="phi", dims="deter", shape=(self.config.bisim_dim,),
+            **self.config.phi_head
+        )
+
+        # self.dT_ema = getattr(self, "dT_ema", 1.0)
+
+        self.bisim_calib = BisimCalib(name="bisim_calib")
+
+        ###################################################################################################
+
     def initial(self, batch_size):
         prev_latent = self.rssm.initial(batch_size)
         prev_action = jnp.zeros((batch_size, *self.act_space.shape))
@@ -313,73 +338,36 @@ class WorldModel(nj.Module):
         
 
     def train(self, data, teacher_data, state,teacher_state,traj=None, teacher_traj=None):
-        # self.traj = traj
-        # self.teacher_traj = teacher_traj
-        print("wmstate:", state)
-        print("wmteacher_state:", teacher_state)
-
-        modules = [self.encoder, self.rssm, *self.heads.values()]
-
-        print("**data:", data.keys())
+        modules = [self.encoder, self.rssm, self.phi_head, self.bisim_calib, *self.heads.values()]
         mets, (state, teacher_state, outs, metrics) = self.opt(modules, self.loss, data, teacher_data, state,teacher_state, traj = traj, teacher_traj = teacher_traj, has_aux=True)
-        print("**outs:", outs.keys())
-        print("out[post]:", outs["post"])
-
         metrics.update(mets)
         self.context = {**data, **outs["post"]}
         self.start = tree_map(lambda x: x.reshape([-1] + list(x.shape[2:])), self.context)
-
-
-
-        print("self.start:", self.start)
-
-        # mets, (state, outs, metrics) = self.opt(modules, self.imagination_loss, data, state, has_aux=True)
-
         return state, teacher_state, outs, metrics
     
     def student_imagine_with_actions(self, start, teacher_actions):
-        """
-        Given an initial student latent 'start' and a batch of teacher_actions,
-        rolls out the STUDENT RSSM with exactly those actions for the same horizon.
-        Returns a dict with the student latents over that rollout.
-        """
         latents = []
         current = start
-
-        # teacher_actions could be shape [horizon, batch_size, action_dim]
         horizon = teacher_actions.shape[0]
 
         for t in range(horizon):
             current = self.rssm.img_step(current, teacher_actions[t])  
-            # current might be a dict like {"deter": ..., "stoch": ...}
             latents.append(current)
 
-        # latents is now a list of dicts (length horizon).
-        # We want to stack them into arrays of shape [horizon, batch_size, ...].
+        deter_list = [x["deter"] for x in latents]  
+        stoch_list = [x["stoch"] for x in latents]  
 
-        # Example: gather all 'deter' and 'stoch' in separate lists:
-        deter_list = [x["deter"] for x in latents]  # each shape [batch_size, deter_dim]
-        stoch_list = [x["stoch"] for x in latents]  # each shape [batch_size, stoch_dim, stoch_dim], etc.
+        rollout_deter = jnp.stack(deter_list, axis=0)   
+        rollout_stoch = jnp.stack(stoch_list, axis=0)   
 
-        # Now stack them along time:
-        rollout_deter = jnp.stack(deter_list, axis=0)   # [horizon, batch_size, deter_dim]
-        rollout_stoch = jnp.stack(stoch_list, axis=0)   # [horizon, batch_size, ..., stoch_dim]
-
-        # Construct the dictionary to return
         rollout_dict = {
             "deter": rollout_deter,
             "stoch": rollout_stoch,
-            # optionally store the actions, or any other fields you need
-            # "actions": teacher_actions,  # if you want them
         }
 
         return rollout_dict
 
     def loss(self,traj,teacher_traj, data, teacher_data, state,teacher_state):
-
-        #########################################
-        # Change 11/4/2025 19:46 PM
-        #########################################
 
         embed = self.encoder(data)
         teacher_embed = self.teacher_wm.encoder(teacher_data)
@@ -389,32 +377,7 @@ class WorldModel(nj.Module):
         prev_actions = jnp.concatenate([prev_action[:, None], data["action"][:, :-1]], 1)     
         teacher_prev_actions = jnp.concatenate([teacher_prev_action[:, None], teacher_data["action"][:, :-1]], 1)
         teacher_post, teacher_prior = self.teacher_wm.rssm.observe(teacher_embed, teacher_prev_actions, teacher_data["is_first"], teacher_prev_latent)
-        # teacher_post  = jax.tree_map(sg, teacher_post)
-        # teacher_prior = jax.tree_map(sg, teacher_prior)
-
         post, prior = self.rssm.observe(embed, prev_actions, data["is_first"], prev_latent)
-
-        # embed = self.encoder(data)
-        # prev_latent, prev_action = state
-
-        # prev_actions = jnp.concatenate([prev_action[:, None], data["action"][:, :-1]], 1)
-
-        # # Teacher on the *same* sequence
-        # teacher_embed = self.teacher_wm.encoder(data)
-        # teacher_prev_latent, teacher_prev_action = teacher_state
-        # teacher_prev_actions = prev_actions
-
-        # teacher_post, teacher_prior = self.teacher_wm.rssm.observe(
-        #     teacher_embed, teacher_prev_actions, data["is_first"], teacher_prev_latent)
-        # teacher_post  = jax.tree_map(sg, teacher_post)
-        # teacher_prior = jax.tree_map(sg, teacher_prior)
-
-        # # Student
-        # post, prior = self.rssm.observe(embed, prev_actions, data["is_first"], prev_latent)
-
-        ##############################################
-        # End Change 11/2/2025 2:50 PM
-        ##############################################
 
         dists = {}
         feats = {**post, "embed": embed}
@@ -425,9 +388,7 @@ class WorldModel(nj.Module):
         losses = {}
         losses["dyn"] = self.rssm.dyn_loss(post, prior, **self.config.dyn_loss)
         losses["rep"] = self.rssm.rep_loss(post, prior, **self.config.rep_loss)
-        print("data:", data.keys())
         for key, dist in dists.items():
-            # print("key:", key)
             loss = -dist.log_prob(data[key].astype(jnp.float32))
             assert loss.shape == embed.shape[:2], (key, loss.shape)
             losses[key] = loss
@@ -447,16 +408,10 @@ class WorldModel(nj.Module):
             teacher_dist_i = distrax.Categorical(probs=teacher_probs_i)
             student_dist_i = distrax.Categorical(probs=student_probs_i)
 
-            kl_i = teacher_dist_i.kl_divergence(student_dist_i)  # shape [T,B]
-            total_kl += kl_i  # Sum over factors
-
-        
-        #########################################
-        # Change 11/4/2025 19:46 PM
-        #########################################
+            kl_i = teacher_dist_i.kl_divergence(student_dist_i)  
+            total_kl += kl_i  
 
         losses["posterior_stoch_kl"] = jnp.mean(total_kl)
-
         losses["posterior_deter_kl"] = jnp.mean((teacher_deter - student_deter) ** 2)
 
         teacher_deter = teacher_prior["deter"]   # shape (16, 64, 4096)
@@ -481,45 +436,32 @@ class WorldModel(nj.Module):
 
         losses["prior_stoch_kl"] = jnp.mean(total_kl)
 
-        # post_t  = self.teacher_wm.rssm.get_dist(teacher_post)
-        # prior_t = self.teacher_wm.rssm.get_dist(teacher_prior)
-        # post_s  = self.rssm.get_dist(post)
-        # prior_s = self.rssm.get_dist(prior)
-
-        # losses["posterior_kl"] = post_t.kl_divergence(post_s).mean()
-        # losses["prior_kl"]     = prior_t.kl_divergence(prior_s).mean()
-
+        ####################################################################################
         # ---- Bisimulation-style pairwise loss (teacher-targeted, student embedding) ----
+        ####################################################################################
+
         EPS = 1e-6
         gamma_bisim = getattr(self.config, "bisim_gamma", 0.99)
         alpha_r     = getattr(self.config, "bisim_alpha_r", 1.0)
         w_deter     = getattr(self.config, "bisim_w_deter", 1.0)
         w_stoch     = getattr(self.config, "bisim_w_stoch", 1.0)
 
-        # def js_divergence(p, q, eps=EPS):
-        #     m = 0.5 * (p + q)
-        #     kl_pm = jnp.sum(p * (jnp.log(p + eps) - jnp.log(m + eps)), axis=-1)
-        #     kl_qm = jnp.sum(q * (jnp.log(q + eps) - jnp.log(m + eps)), axis=-1)
-        #     return 0.5 * (kl_pm + kl_qm)  # [...,]
-
         # 1) Teacher "next-latent" (one-step prior)
         t_deter = teacher_prior["deter"]                          # [T,B,Dd]
         t_probs = jax.nn.softmax(teacher_prior["stoch"], -1)      # [T,B,G,C]
 
-        # 2) Student embedding phi(s) from posterior (current state)
-        s_deter = post["deter"]                                   # [T,B,Dd]
-        s_probs = jax.nn.softmax(post["stoch"], -1)               # [T,B,G,C]
-        phi_s   = jnp.concatenate([s_deter, s_probs.reshape(s_probs.shape[0], s_probs.shape[1], -1)], axis=-1)  # [T,B,Dphi]
-
-        # 3) Create O(B) pairs by a permutation (per time step)
+        # 2) Create O(B) pairs by a permutation (per time step)
         B = t_deter.shape[1]
         perm = jax.random.permutation(nj.rng(), B)
-        t_deter_i, t_deter_j = t_deter, t_deter[:, perm]
-        t_probs_i, t_probs_j = t_probs, t_probs[:, perm]
-        phi_i,    phi_j      = phi_s,   phi_s[:, perm]
+
+        # 3) Student embedding phi(s) from posterior (current state)
+        raw_phi = self.phi_head(feats).mean()               # [T,B,D]
+        phi_s   = raw_phi / (jnp.linalg.norm(raw_phi, axis=-1, keepdims=True) + 1e-6)
+        phi_i, phi_j = phi_s, phi_s[:, perm]
+        phi_gap = jnp.linalg.norm(phi_i - phi_j, axis=-1)
+
 
         # 4) Teacher bisimulation target d_T(i,j)
-        # 4a) Reward gap (dense teacher reward if logged; else predict with teacher head)
         if "reward" in teacher_data:
             r_T = teacher_data["reward"]
             if r_T.ndim == 3 and r_T.shape[-1] == 1:
@@ -530,7 +472,10 @@ class WorldModel(nj.Module):
             r_pred = self.teacher_wm.heads["reward"](jax.lax.stop_gradient(t_feats)).mean()[..., 0]  # [T,B]
             dr = jnp.abs(r_pred - r_pred[:, perm])
 
+        #########################################################################################
         # ----------------- BEGIN PATCH: multi-action + multi-step bisimulation -----------------
+        #########################################################################################
+
         EPS = 1e-6
         mode      = getattr(self.config, "bisim_mode", "single")        # "single" | "multi"
         K_actions = int(getattr(self.config, "bisim_K_actions", 1))
@@ -572,10 +517,6 @@ class WorldModel(nj.Module):
         deter_gap_1 = jnp.linalg.norm(nxt_i["deter"] - nxt_j["deter"], axis=-1)             # [T,B]
         stoch_gap_1 = js_divergence(jax.nn.softmax(nxt_i["stoch"], -1),
                                     jax.nn.softmax(nxt_j["stoch"], -1)).mean(axis=-1)       # [T,B]
-
-        # One-step (single-action) baseline gaps on full T
-        # deter_gap_1 = jnp.linalg.norm(t_deter_i - t_deter_j, axis=-1)         # [T,B]
-        # stoch_gap_1 = js_divergence(t_probs_i, t_probs_j).mean(axis=-1)       # [T,B]
 
         # --- Multi-step machinery works on T_eff so we can look ahead H steps ---
         T = t_deter.shape[0]
@@ -641,8 +582,6 @@ class WorldModel(nj.Module):
                     cand.append(jnp.clip(base + eps, -1.0, 1.0))
                 return jnp.stack(cand[:K], axis=0)  # [K, T_eff, B, A]
 
-
-
         def _rollout_gap_for_actionsK(actionsK_first_step):
             """
             actionsK_first_step: [K,T_eff,B,A/C] candidates for step-0 only.
@@ -697,8 +636,6 @@ class WorldModel(nj.Module):
 
         # Build the teacher bisimulation target
         dT = alpha_r * dr + gamma_bisim * trans_gap                      # [T,B]
-        # ------------------ END PATCH -----------------------------------------------------------------
-
 
         # Optional: mask terminals/episode starts
         mask = (1.0 - data["is_terminal"].astype(jnp.float32)) * (1.0 - data["is_first"].astype(jnp.float32))
@@ -706,30 +643,23 @@ class WorldModel(nj.Module):
             mask = mask.squeeze(-1)  # [T,B]
         dT  = dT  * mask
 
-        # 5) Student distance and regression to teacher target
-        phi_gap = jnp.linalg.norm(phi_i - phi_j, axis=-1)              # [T,B]
+        batch_mean = (jnp.sum(dT * mask) / (jnp.sum(mask) + 1e-6))
+        # self.dT_ema = 0.99 * self.dT_ema + 0.01 * batch_mean
+        new_ema = 0.99 * self.dT_ema.read() + 0.01 * batch_mean
+        self.dT_ema.write(new_ema)                # or nj.assign(self.dT_ema, new_ema)
+        dT_norm = dT / (self.dT_ema.read() + 1e-6)
 
-        # Normalize target scale to stabilize training
-        # dT_norm = dT / (jnp.mean(dT + EPS))
+        # scale = self.bisim_scale.value
+        # bias  = self.bisim_bias.value
+        # pred  = scale * phi_gap + bias
 
-        # Replace your dT_norm = dT / (jnp.mean(dT + EPS)) with:
-        denom = (jnp.sum(dT * mask) / (jnp.sum(mask) + 1e-6)) + 1e-6
-        dT_norm = dT / denom
+        pred = self.bisim_calib(phi_gap)
+        err   = pred - jax.lax.stop_gradient(dT_norm)
+        losses["bisim_pair"] = (huber(err, 1.0) * mask).mean()
 
-
-        # bisim_pair_loss = ((phi_gap - jax.lax.stop_gradient(dT_norm)) ** 2) * mask
-        # losses["bisim_pair"] = bisim_pair_loss.mean()
-        # With Huber:
         bisim_pair_loss = huber(phi_gap - jax.lax.stop_gradient(dT_norm), delta=1.0) * mask
-        losses["bisim_pair"] = bisim_pair_loss.mean()
                 
-        #################################################################
-
-
-        #########################################
-        # End Change 11/2/2025 2:50 PM
-        #########################################
-
+        ###############################################################################################################
 
         if traj is None or teacher_traj is None:
             pass
@@ -754,7 +684,6 @@ class WorldModel(nj.Module):
             kl_deter_arr = jnp.stack(kl_deter_list, axis=0)            # [H, batch]
             losses["dist_deter_imagined"] = kl_deter_arr.mean()
 
-
         distill = {}
         if "posterior_stoch_kl" in losses:
             distill["wm/post_kl_stoch"]  = losses["posterior_stoch_kl"]
@@ -774,23 +703,6 @@ class WorldModel(nj.Module):
         scaled = {k: v * self.scales[k] for k, v in losses.items()}
         model_loss = sum(scaled.values())
 
-        #########################################
-        # Change 11/4/2025 19:46 PM
-        #########################################
-
-        # self.context        = {**data, **post}
-        # self.start          = tree_map(lambda x: x.reshape([-1] + list(x.shape[2:])), self.context)
-
-
-        # self.teacher_context = {**data, **teacher_post}
-        # self.teacher_start   = tree_map(lambda x: x.reshape([-1] + list(x.shape[2:])), self.teacher_context)
-
-        #########################################
-        # End Change 11/2/2025 2:50 PM
-        #########################################
-
-
-
 
         out = {"embed": embed, "post": post, "prior": prior}
         out.update({f"{k}_loss": v for k, v in losses.items()})
@@ -804,15 +716,77 @@ class WorldModel(nj.Module):
         metrics = self._metrics(data, dists, post, prior, losses, model_loss)
         metrics["model_loss_raw"] = model_loss  # Store model loss for Curious Replay prioritization
 
-        def _pearson(x, y, eps=1e-8):
-            x = (x - x.mean()) / (x.std() + eps)
-            y = (y - y.mean()) / (y.std() + eps)
-            return (x * y).mean()
+        # def _pearson(x, y, eps=1e-8):
+        #     x = (x - x.mean()) / (x.std() + eps)
+        #     y = (y - y.mean()) / (y.std() + eps)
+        #     return (x * y).mean()
+        
+        # valid = mask > 0.5
+        # x = phi_gap[valid]
+        # y = dT[valid]
 
-        metrics["bisim_pair_corr"] = _pearson(phi_gap.reshape(-1), dT.reshape(-1))
-        metrics["bisim_mode"]      = jnp.array(1.0 if mode == "multi" else 0.0)
-        metrics["bisim_K"]         = jnp.array(float(K_actions))
-        metrics["bisim_ms_H"]      = jnp.array(float(H))
+        # valid = (mask > 0.5).astype(phi_gap.dtype)
+        # x = phi_gap * valid + (1 - valid) * 0.0  # or use jnp.where(valid, phi_gap, 0)
+        # y = dT * valid
+
+        w = mask.astype(phi_gap.dtype)
+        wsum = jnp.sum(w) + 1e-8
+
+        x_mean = jnp.sum(w * phi_gap) / wsum
+        y_mean = jnp.sum(w * dT) / wsum
+        x_std  = jnp.sqrt(jnp.sum(w * (phi_gap - x_mean)**2) / wsum + 1e-8)
+        y_std  = jnp.sqrt(jnp.sum(w * (dT      - y_mean)**2) / wsum + 1e-8)
+        cov_xy = jnp.sum(w * (phi_gap - x_mean) * (dT - y_mean)) / wsum
+        metrics["bisim_pair_corr"] = cov_xy / (x_std * y_std + 1e-8)
+
+        metrics["bisim_phi_gap_mean"] = x_mean
+        metrics["bisim_phi_gap_std"]  = x_std
+        metrics["bisim_target_mean"]  = y_mean
+        metrics["bisim_target_std"]   = y_std
+
+        # def _pearson_masked(x, y, eps=1e-8):
+        #     x = (x - x.mean()) / (x.std() + eps)
+        #     y = (y - y.mean()) / (y.std() + eps)
+        #     return (x * y).mean()
+        
+        # metrics["bisim_pair_corr"] = _pearson_masked(x, y)
+
+        # def _spearman_masked(x, y, eps=1e-8):
+        #     rx = jnp.argsort(jnp.argsort(x))
+        #     ry = jnp.argsort(jnp.argsort(y))
+        #     rx = (rx - rx.mean()) / (rx.std() + eps)
+        #     ry = (ry - ry.mean()) / (ry.std() + eps)
+        #     return (rx * ry).mean()
+        
+        # metrics["bisim_pair_spearman"] = _spearman_masked(x, y)
+
+        dtype = phi_gap.dtype
+        metrics["bisim_mode"] = jnp.asarray(1.0 if mode == "multi" else 0.0, dtype)
+        metrics["bisim_K"]    = jnp.asarray(float(K_actions), dtype)
+        metrics["bisim_ms_H"] = jnp.asarray(float(H), dtype)
+
+        # metrics["bisim_pair_corr"] = _pearson(phi_gap.reshape(-1), dT.reshape(-1))
+        # metrics["bisim_mode"]      = jnp.array(1.0 if mode == "multi" else 0.0)
+        # metrics["bisim_K"]         = jnp.array(float(K_actions))
+        # metrics["bisim_ms_H"]      = jnp.array(float(H))
+
+        metrics["bisim_phi_gap_mean"] = x.mean()
+        metrics["bisim_phi_gap_std"]  = x.std()
+        metrics["bisim_target_mean"]  = y.mean()
+        metrics["bisim_target_std"]   = y.std()
+        # metrics["bisim_scale"] = self.bisim_scale.value
+        # metrics["bisim_bias"]  = self.bisim_bias.value
+        # metrics["bisim_scale"] = jnp.asarray(self.bisim_scale, jnp.float32)
+        # metrics["bisim_bias"]  = jnp.asarray(self.bisim_bias,  jnp.float32)
+        # metrics["bisim_scale"] = jnp.asarray(self.bisim_calib.scale, jnp.float32)
+        # metrics["bisim_bias"]  = jnp.asarray(self.bisim_calib.bias,  jnp.float32)
+
+        metrics["bisim_scale"] = self.bisim_calib.scale.read()
+        metrics["bisim_bias"] = self.bisim_calib.bias.read()
+
+
+        metrics.update(jaxutils_student.tensorstats(bisim_pair_loss, "bisim_pair"))  
+
 
         metrics.update({f"distill/{k}": v for k, v in distill.items()})
         return model_loss.mean(), (state,teacher_state, out, metrics)
@@ -834,9 +808,9 @@ class WorldModel(nj.Module):
         
         teacher_latent0 = self.start
 
-        print("teacher_latent0:", teacher_latent0)
+        # print("teacher_latent0:", teacher_latent0)
 
-        print("teacher_policy:", self.teacher_policy)   
+        # print("teacher_policy:", self.teacher_policy)   
 
         if self.teacher_policy is None or teacher_latent0 is None:
             pass
@@ -845,7 +819,7 @@ class WorldModel(nj.Module):
                 self.teacher_policy, teacher_latent0, horizon=self.config.imag_horizon
             )
 
-            print("pass")
+            # print("pass")
 
             student_latent0 = self.start
             student_traj = self.student_imagine_with_actions(
@@ -875,14 +849,14 @@ class WorldModel(nj.Module):
         return model_loss.mean(), (state, out, metrics)
 
     def imagine(self, policy, start, horizon):
-        print("1. agent imagination start:", start.keys())
+        # print("1. agent imagination start:", start.keys())
         first_cont = (1.0 - start["is_terminal"]).astype(jnp.float32)
         keys = list(self.rssm.initial(1).keys())
-        print("1. keys:", keys)
+        # print("1. keys:", keys)
         start = {k: v for k, v in start.items() if k in keys}
-        print("2. agent imagination start:", start.keys())
+        # print("2. agent imagination start:", start.keys())
         start["action"] = policy(start)
-        print("3. agent imagination start:", start.keys())
+        # print("3. agent imagination start:", start.keys())
         def step(prev, _):
             prev = prev.copy()
             state = self.rssm.img_step(prev, prev.pop("action"))
@@ -1021,8 +995,8 @@ class ImagActorCritic(nj.Module):
             #########################################
             # End Change 11/2/2025 2:50 PM
             #########################################
-            print("1.traj:", traj.keys())
-            print("2.teacher_traj:", teacher_traj.keys())
+            # print("1.traj:", traj.keys())
+            # print("2.teacher_traj:", teacher_traj.keys())
 
             
 
@@ -1116,10 +1090,10 @@ class ImagActorCritic(nj.Module):
         metrics.update(jaxutils_student.tensorstats(kl_div, "distill/actor/policy_kl"))
 
 
-        if key == "teacher":
-            jax.debug.print("Teacher reward = {}", rew)
-            jax.debug.print("Teacher reward mean = {}", rew.mean())
-            jax.debug.print("Teacher reward std = {}", rew.std())
+        # if key == "teacher":
+            # jax.debug.print("Teacher reward = {}", rew)
+            # jax.debug.print("Teacher reward mean = {}", rew.mean())
+            # jax.debug.print("Teacher reward std = {}", rew.std())
             # print("************************************" , rew.mean())
             # print("************************************" , rew.std())
 

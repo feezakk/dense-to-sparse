@@ -198,6 +198,23 @@ defaults:
   bisim_w_deter: 1.0
   bisim_w_stoch: 1.0
 
+  bisim_dim: 128
+  phi_head:
+    {
+      layers: 3,
+      units: 1024,
+      act: silu,
+      norm: layer,
+      inputs: [deter],
+      winit: normal,
+      fan: avg,
+    }
+
+  # bisim_dim: 128
+  # phi_head:
+  #   layers: [512, 512]
+  #   act: silu
+
 
   dyn_loss: { impl: kl, free: 1.0 }
   rep_loss: { impl: kl, free: 1.0 }
