@@ -294,34 +294,34 @@ class Agent(nj.Module):
 #         return scale * gap + bias
     
 
-# class BisimCalib(nj.Module):
-#     def __init__(self, name="bisim_calib"):
-#         self.scale = nj.Variable(jnp.ones, (), jnp.float32, name="scale")
-#         self.bias = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
-
-#     def ensure_initialized(self):
-#         if nj.creating():
-#             self.scale.read()
-#             self.bias.read()
-
-#     def __call__(self, gap):
-#         self.ensure_initialized()
-#         scale = self.scale.read()
-#         bias = self.bias.read()
-#         return scale * gap + bias
-    
 class BisimCalib(nj.Module):
     def __init__(self, name="bisim_calib"):
-        self._raw_scale = nj.Variable(jnp.zeros, (), jnp.float32, name="raw_scale")
-        self._raw_bias  = nj.Variable(jnp.zeros, (), jnp.float32, name="raw_bias")
+        self.scale = nj.Variable(jnp.ones, (), jnp.float32, name="scale")
+        self.bias = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
+
+    def ensure_initialized(self):
+        if nj.creating():
+            self.scale.read()
+            self.bias.read()
 
     def __call__(self, gap):
-        # Materialize state on create pass
-        if nj.creating():
-            self._raw_scale.read(); self._raw_bias.read()
-        scale = jax.nn.softplus(self._raw_scale.read()) + 1e-6   # > 0
-        bias  = jax.nn.softplus(self._raw_bias.read())           # >= 0
+        self.ensure_initialized()
+        scale = self.scale.read()
+        bias = self.bias.read()
         return scale * gap + bias
+    
+# class BisimCalib(nj.Module):
+#     def __init__(self, name="bisim_calib"):
+#         self._raw_scale = nj.Variable(jnp.zeros, (), jnp.float32, name="raw_scale")
+#         self._raw_bias  = nj.Variable(jnp.zeros, (), jnp.float32, name="raw_bias")
+
+#     def __call__(self, gap):
+#         # Materialize state on create pass
+#         if nj.creating():
+#             self._raw_scale.read(); self._raw_bias.read()
+#         scale = jax.nn.softplus(self._raw_scale.read()) + 1e-6   # > 0
+#         bias  = jax.nn.softplus(self._raw_bias.read())           # >= 0
+#         return scale * gap + bias
 
 class WorldModel(nj.Module):
     def __init__(self, obs_space, act_space, teacher_wm, teacher_policy, start, context, config):
