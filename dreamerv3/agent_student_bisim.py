@@ -294,20 +294,33 @@ class Agent(nj.Module):
 #         return scale * gap + bias
     
 
+# class BisimCalib(nj.Module):
+#     def __init__(self, name="bisim_calib"):
+#         self.scale = nj.Variable(jnp.ones, (), jnp.float32, name="scale")
+#         self.bias = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
+
+#     def ensure_initialized(self):
+#         if nj.creating():
+#             self.scale.read()
+#             self.bias.read()
+
+#     def __call__(self, gap):
+#         self.ensure_initialized()
+#         scale = self.scale.read()
+#         bias = self.bias.read()
+#         return scale * gap + bias
+    
 class BisimCalib(nj.Module):
     def __init__(self, name="bisim_calib"):
-        self.scale = nj.Variable(jnp.ones, (), jnp.float32, name="scale")
-        self.bias = nj.Variable(jnp.zeros, (), jnp.float32, name="bias")
-
-    def ensure_initialized(self):
-        if nj.creating():
-            self.scale.read()
-            self.bias.read()
+        self._raw_scale = nj.Variable(jnp.zeros, (), jnp.float32, name="raw_scale")
+        self._raw_bias  = nj.Variable(jnp.zeros, (), jnp.float32, name="raw_bias")
 
     def __call__(self, gap):
-        self.ensure_initialized()
-        scale = self.scale.read()
-        bias = self.bias.read()
+        # Materialize state on create pass
+        if nj.creating():
+            self._raw_scale.read(); self._raw_bias.read()
+        scale = jax.nn.softplus(self._raw_scale.read()) + 1e-6   # > 0
+        bias  = jax.nn.softplus(self._raw_bias.read())           # >= 0
         return scale * gap + bias
 
 class WorldModel(nj.Module):
@@ -516,7 +529,7 @@ class WorldModel(nj.Module):
         #     t_feats = {**teacher_post, "embed": teacher_embed}
         #     r_pred = self.teacher_wm.heads["reward"](jax.lax.stop_gradient(t_feats)).mean()[..., 0]  # [T,B]
         #     dr = jnp.abs(r_pred - r_pred[:, perm])
-
+        T, B = teacher_post["deter"].shape[:2]
         t_feats = {**teacher_post, "embed": teacher_embed}
         r_pred = self.teacher_wm.heads["reward"](jax.lax.stop_gradient(t_feats)).mean()
 
@@ -701,24 +714,41 @@ class WorldModel(nj.Module):
         #         return jax.scipy.special.logsumexp(gaps / tau, axis=0) * tau  # [T_eff,B]
 
                 # --- multi-step under π_T: at each step sample a_i ~ π_T(·|s_i^h), a_j ~ π_T(·|s_j^h) ---
-        def _rollout_gap_piT(lat_i0, lat_j0, H_):
-            lat_i, lat_j = lat_i0, lat_j0
-            det_gaps, st_gaps = [], []
-            for h in range(H_):
-                kk_i, kk_j = jax.random.split(nj.rng())
-                a_i_h = _sample_teacher_actions_TB(lat_i, kk_i)                 # [T_eff,B,A]
-                a_j_h = _sample_teacher_actions_TB(lat_j, kk_j)
-                lat_i = _img_step_all(self.teacher_wm.rssm, lat_i, a_i_h)       # next latents
-                lat_j = _img_step_all(self.teacher_wm.rssm, lat_j, a_j_h)
-                det_gaps.append(jnp.linalg.norm(lat_i["deter"] - lat_j["deter"], axis=-1))
-                st_gaps.append(js_divergence(
-                    jax.nn.softmax(lat_i["stoch"], -1),
-                    jax.nn.softmax(lat_j["stoch"], -1)
-                ).mean(axis=-1))
-            det_gaps = jnp.stack(det_gaps, axis=0)  # [H_, T_eff, B]
-            st_gaps  = jnp.stack(st_gaps,  axis=0)  # [H_, T_eff, B]
+        # def _rollout_gap_piT(lat_i0, lat_j0, H_):
+        #     lat_i, lat_j = lat_i0, lat_j0
+        #     det_gaps, st_gaps = [], []
+        #     for h in range(H_):
+        #         kk_i, kk_j = jax.random.split(nj.rng())
+        #         a_i_h = _sample_teacher_actions_TB(lat_i, kk_i)                 # [T_eff,B,A]
+        #         a_j_h = _sample_teacher_actions_TB(lat_j, kk_j)
+        #         lat_i = _img_step_all(self.teacher_wm.rssm, lat_i, a_i_h)       # next latents
+        #         lat_j = _img_step_all(self.teacher_wm.rssm, lat_j, a_j_h)
+        #         det_gaps.append(jnp.linalg.norm(lat_i["deter"] - lat_j["deter"], axis=-1))
+        #         st_gaps.append(js_divergence(
+        #             jax.nn.softmax(lat_i["stoch"], -1),
+        #             jax.nn.softmax(lat_j["stoch"], -1)
+        #         ).mean(axis=-1))
+        #     det_gaps = jnp.stack(det_gaps, axis=0)  # [H_, T_eff, B]
+        #     st_gaps  = jnp.stack(st_gaps,  axis=0)  # [H_, T_eff, B]
+        #     h_w = (ms_gamma ** jnp.arange(1, H_ + 1)).reshape(H_, 1, 1)
+        #     return (h_w * (w_deter * det_gaps + w_stoch * st_gaps)).sum(axis=0)  # [T_eff,B]
+        
+        def _rollout_gap_piT(lat_i0, lat_j0, H_, key):
+            def body(carry, _):
+                lat_i, lat_j, k = carry
+                k, k_i, k_j = jax.random.split(k, 3)
+                a_i = _sample_teacher_actions_TB(lat_i, k_i)   # [T_eff, B, A]
+                a_j = _sample_teacher_actions_TB(lat_j, k_j)
+                lat_i = _img_step_all(self.teacher_wm.rssm, lat_i, a_i)
+                lat_j = _img_step_all(self.teacher_wm.rssm, lat_j, a_j)
+                det_gap = jnp.linalg.norm(lat_i["deter"] - lat_j["deter"], axis=-1)  # [T_eff,B]
+                st_gap  = js_divergence(jax.nn.softmax(lat_i["stoch"], -1),
+                                        jax.nn.softmax(lat_j["stoch"], -1)).mean(axis=-1)
+                return (lat_i, lat_j, k), (det_gap, st_gap)
+
+            (_, _, _), (det_gaps, st_gaps) = jax.lax.scan(body, (lat_i0, lat_j0, key), None, length=H_)
             h_w = (ms_gamma ** jnp.arange(1, H_ + 1)).reshape(H_, 1, 1)
-            return (h_w * (w_deter * det_gaps + w_stoch * st_gaps)).sum(axis=0)  # [T_eff,B]
+            return (h_w * (w_deter * det_gaps + w_stoch * st_gaps)).sum(axis=0)  # [T_eff, B]
 
 
         # if (mode == "multi") and (K_actions > 1):
@@ -743,9 +773,11 @@ class WorldModel(nj.Module):
             if K_actions > 1:
                 # Monte Carlo expectation under π_T using K independent rollouts
                 keys = jax.random.split(nj.rng(), K_actions)
-                trans_gap_eff = jax.vmap(lambda _k:
-                    _rollout_gap_piT(teacher_post_eff, teacher_post_perm_eff, H_eff)
-                )(keys).mean(axis=0)  # [T_eff,B]
+                # trans_gap_eff = jax.vmap(lambda _k:
+                #     _rollout_gap_piT(teacher_post_eff, teacher_post_perm_eff, H_eff)
+                # )(keys).mean(axis=0)  # [T_eff,B]
+                trans_gap_eff = jax.vmap(lambda k: _rollout_gap_piT(teacher_post_eff, teacher_post_perm_eff, H_eff, k))(keys).mean(axis=0)
+
             else:
                 trans_gap_eff = _rollout_gap_piT(teacher_post_eff, teacher_post_perm_eff, H_eff)
 
@@ -763,9 +795,12 @@ class WorldModel(nj.Module):
         dT = alpha_r * dr + gamma_bisim * trans_gap                      # [T,B]
 
         # Optional: mask terminals/episode starts
-        mask = (1.0 - data["is_terminal"].astype(jnp.float32)) * (1.0 - data["is_first"].astype(jnp.float32))
-        if mask.ndim == 3 and mask.shape[-1] == 1:
-            mask = mask.squeeze(-1)  # [T,B]
+        # mask = (1.0 - data["is_terminal"].astype(jnp.float32)) * (1.0 - data["is_first"].astype(jnp.float32))
+        # if mask.ndim == 3 and mask.shape[-1] == 1:
+        #     mask = mask.squeeze(-1)  # [T,B]
+
+        mask = (1.0 - teacher_data["is_terminal"].astype(jnp.float32)) * (1.0 - teacher_data["is_first"].astype(jnp.float32))
+        mask = mask.squeeze(-1) if mask.ndim == 3 and mask.shape[-1] == 1 else mask   
         dT  = dT  * mask
 
         batch_mean = (jnp.sum(dT * mask) / (jnp.sum(mask) + 1e-6))
@@ -909,7 +944,7 @@ class WorldModel(nj.Module):
         # metrics["bisim_scale"] = self.bisim_calib.scale.read()
         # metrics["bisim_bias"] = self.bisim_calib.bias.read()
 
-        scale_eff = jax.nn.softplus(self.bisim_calib.scale.read()) + 1e-4
+        scale_eff = jax.nn.softplus(self.bisim_calib.scale.read()) + 1e-6
         bias_eff  = jnp.maximum(self.bisim_calib.bias.read(), 0.0)
         metrics["bisim_scale"] = scale_eff
         metrics["bisim_bias"]  = bias_eff
