@@ -312,6 +312,35 @@ class CarlaOvertakeStudentEnv(gym.Env):
     # --------------------------------------------------------------------------
     # Gym methods: reset, step, (optional) render, close
     # --------------------------------------------------------------------------
+
+    def _safe_destroy(self,actor):
+        # CARLA actors become invalid immediately after destroy().
+        # This guard ensures we don't crash if the actor is already dead or invalid.
+        if actor is None:
+            return
+        try:
+            # `.is_alive` is cheap; only destroy when true.
+            if getattr(actor, "is_alive", False):
+                actor.destroy()
+        except RuntimeError:
+            # "trying to operate on a destroyed actor" → ignore and proceed
+            pass
+
+    def _destroy_batch(self, world, actors):
+        # Prefer batched destruction to avoid racey per-actor calls.
+        actors = [a for a in actors if a is not None and getattr(a, "is_alive", False)]
+        if not actors:
+            return
+        try:
+            cmds = [carla.command.DestroyActor(a) for a in actors]
+            world.apply_batch_sync(cmds, True)
+        except Exception:
+            # Fall back to per-actor best-effort
+            for a in actors:
+                self._safe_destroy(a)
+
+
+
     def reset(self):
         self._clean_actors()
     
@@ -348,6 +377,11 @@ class CarlaOvertakeStudentEnv(gym.Env):
         # Collision Detection
         self.collision_detected = False
         self.collision_hist = []
+
+        self._destroy_batch(self.world, [self.nonego] + getattr(self, "other_vehicles", []))
+        self.nonego = None
+        self.other_vehicles = []
+        self.world.tick()  # ensure destruction applies before respawn
 
         self.world.tick()
 
@@ -470,9 +504,13 @@ class CarlaOvertakeStudentEnv(gym.Env):
             pass
         else:
             if self.nonego is not None:
-                self.nonego.destroy()
-            if self.nonego.is_alive:
-                self.nonego.destroy()
+                self._safe_destroy(self.nonego)
+                self.nonego = None
+                # self.nonego.destroy()
+            # if self.nonego.is_alive:
+            #     self.nonego.destroy()
+            self._destroy_batch(self.world, getattr(self, "other_vehicles", []))
+            self.other_vehicles = []
             self.reset_other_vehicles()
 
         # 4. Update waypoint
@@ -549,6 +587,9 @@ class CarlaOvertakeStudentEnv(gym.Env):
         """
         Properly close the env, destroy actors, etc.
         """
+        self._destroy_batch(self.world, [self.nonego] + getattr(self, "other_vehicles", []))
+        self.nonego = None
+        self.other_vehicles = []
         self._clean_actors()
         pass
 

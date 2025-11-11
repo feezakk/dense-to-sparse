@@ -496,11 +496,11 @@ class WorldModel(nj.Module):
         w_deter     = getattr(self.config, "bisim_w_deter", 1.0)
         w_stoch     = getattr(self.config, "bisim_w_stoch", 1.0)
 
-        def js_divergence(p, q, eps=EPS):
-            m = 0.5 * (p + q)
-            kl_pm = jnp.sum(p * (jnp.log(p + eps) - jnp.log(m + eps)), axis=-1)
-            kl_qm = jnp.sum(q * (jnp.log(q + eps) - jnp.log(m + eps)), axis=-1)
-            return 0.5 * (kl_pm + kl_qm)  # [...,]
+        # def js_divergence(p, q, eps=EPS):
+        #     m = 0.5 * (p + q)
+        #     kl_pm = jnp.sum(p * (jnp.log(p + eps) - jnp.log(m + eps)), axis=-1)
+        #     kl_qm = jnp.sum(q * (jnp.log(q + eps) - jnp.log(m + eps)), axis=-1)
+        #     return 0.5 * (kl_pm + kl_qm)  # [...,]
 
         # 1) Teacher "next-latent" (one-step prior)
         t_deter = teacher_prior["deter"]                          # [T,B,Dd]
@@ -540,12 +540,21 @@ class WorldModel(nj.Module):
         H         = int(getattr(self.config, "bisim_ms_horizon", 1))    # multi-step horizon
         ms_gamma  = float(getattr(self.config, "bisim_ms_discount", 0.99))
 
+        # Horizon guard (Python ints so we can use range(H_eff) safely under JIT)
+        T      = int(teacher_post["deter"].shape[0])
+        H_eff  = max(1, min(H, T))
+        T_eff  = T - (H_eff - 1)
+
         # Helpers
         def js_divergence(p, q, eps=EPS):
             m = 0.5 * (p + q)
             kl_pm = jnp.sum(p * (jnp.log(p + eps) - jnp.log(m + eps)), axis=-1)
             kl_qm = jnp.sum(q * (jnp.log(q + eps) - jnp.log(m + eps)), axis=-1)
             return 0.5 * (kl_pm + kl_qm)  # [...,]
+        
+        def huber(x, delta=1.0):
+            a = jnp.abs(x)
+            return jnp.where(a <= delta, 0.5 * x * x, delta * (a - 0.5 * delta))
 
         def _img_step_all(rssm, prev_latent, actions):
             """prev_latent keys [T_eff,B,...], actions [T_eff,B,A] -> next_latent [T_eff,B,...]."""
@@ -555,9 +564,18 @@ class WorldModel(nj.Module):
             nxt_flat  = rssm.img_step(prev_flat, a_flat)
             return jax.tree_map(lambda x: x.reshape(prev_latent["deter"].shape[:2] + x.shape[1:]), nxt_flat)
 
+        # One-step baseline via img_step from teacher_post using the executed action at t
+        tpost_i, tpost_j = teacher_post, jax.tree_map(lambda x: x[:, perm], teacher_post)
+        nxt_i = _img_step_all(self.teacher_wm.rssm, tpost_i, teacher_data["action"][:T])  # [T,B,...]
+        nxt_j = _img_step_all(self.teacher_wm.rssm, tpost_j, teacher_data["action"][:T])
+
+        deter_gap_1 = jnp.linalg.norm(nxt_i["deter"] - nxt_j["deter"], axis=-1)             # [T,B]
+        stoch_gap_1 = js_divergence(jax.nn.softmax(nxt_i["stoch"], -1),
+                                    jax.nn.softmax(nxt_j["stoch"], -1)).mean(axis=-1)       # [T,B]
+
         # One-step (single-action) baseline gaps on full T
-        deter_gap_1 = jnp.linalg.norm(t_deter_i - t_deter_j, axis=-1)         # [T,B]
-        stoch_gap_1 = js_divergence(t_probs_i, t_probs_j).mean(axis=-1)       # [T,B]
+        # deter_gap_1 = jnp.linalg.norm(t_deter_i - t_deter_j, axis=-1)         # [T,B]
+        # stoch_gap_1 = js_divergence(t_probs_i, t_probs_j).mean(axis=-1)       # [T,B]
 
         # --- Multi-step machinery works on T_eff so we can look ahead H steps ---
         T = t_deter.shape[0]
@@ -572,31 +590,58 @@ class WorldModel(nj.Module):
             actions_seq.append(teacher_data["action"][h:h+T_eff].astype(jnp.float32))
         actions_seq = jnp.stack(actions_seq, axis=0)  # [H, T_eff, B, A]
 
+        def _decode(flat_idx, n_steer):
+            acc = flat_idx // n_steer
+            steer = flat_idx % n_steer
+            return acc, steer
+
+        def _encode(acc, steer, n_steer):
+            return acc * n_steer + steer
+
+        def _build_actions_K_discrete_near_steer(base_onehot_eff, n_steer, n_acc, S, K):
+            """
+            base_onehot_eff: [T_eff, B, A]  one-hot teacher actions at t (A = n_steer * n_acc)
+            Returns: actions_K: [K, T_eff, B, A] candidates that vary steer by {-S, 0, +S}
+                    while keeping acc fixed. K <= (2S + 1).
+            """
+            num_actions = n_steer * n_acc
+            idx = jnp.argmax(base_onehot_eff, axis=-1)  # [T_eff, B]
+
+            def neighbors(i):
+                acc, steer = _decode(i, n_steer)
+                cand = jnp.array([
+                    _encode(acc, jnp.clip(steer - S, 0, n_steer - 1), n_steer),
+                    _encode(acc, steer,                                  n_steer),
+                    _encode(acc, jnp.clip(steer + S, 0, n_steer - 1), n_steer),
+                ], dtype=jnp.int32)  # [3]
+                return cand[:K]
+
+            cand_idx = jax.vmap(jax.vmap(neighbors))(idx)     # [T_eff, B, K]
+            cand_idx = jnp.transpose(cand_idx, (2, 0, 1))     # [K, T_eff, B]
+            actions_K = jax.nn.one_hot(cand_idx, num_actions, dtype=jnp.float32)  # [K,T_eff,B,A]
+            return actions_K
+        
         def _build_actions_K(base_actions_eff, K):
             """Return actions_K: [K, T_eff, B, A] around base_actions_eff (teacher executed)."""
             if getattr(self.act_space, "discrete", False):
-                num_actions = base_actions_eff.shape[-1]
-                idx = jnp.argmax(base_actions_eff, axis=-1)  # [T_eff,B]
-                offs = jnp.arange(K)  # [K], offsets 0..K-1
-                cand_idx = (idx[..., None] + offs[None, None, :]) % num_actions  # [T_eff,B,K]
-                # one-hot per candidate k
-                def onehot_k(k):
-                    return jax.nn.one_hot(cand_idx[..., k], num_actions, dtype=jnp.float32)  # [T_eff,B,C]
-                return jax.vmap(onehot_k)(jnp.arange(K))  # [K,T_eff,B,C]
+                n_steer = int(getattr(self.config, "bisim_n_steer", 5))
+                n_acc   = int(getattr(self.config, "bisim_n_acc",   2))
+                S       = int(getattr(self.config, "bisim_steer_stride", 1))  # +/- 1 steer bin
+                return _build_actions_K_discrete_near_steer(base_actions_eff, n_steer, n_acc, S, K)
             else:
-                # continuous: +/- delta on steering dim
+                # (keep your existing continuous branch unchanged)
                 delta = float(getattr(self.config, "bisim_delta", 0.25))
                 steer_dim = int(getattr(self.config, "bisim_steer_dim", 0))
                 base = base_actions_eff
                 a_plus  = base.at[..., steer_dim].add(delta)
                 a_minus = base.at[..., steer_dim].add(-delta)
-                # Clip to common [-1,1]; adjust if your action bounds differ
                 cand = [base, jnp.clip(a_plus, -1.0, 1.0), jnp.clip(a_minus, -1.0, 1.0)]
                 if K > 3:
-                    # simple extra candidate: small all-dims push
                     eps = 0.1 * delta
                     cand.append(jnp.clip(base + eps, -1.0, 1.0))
-                return jnp.stack(cand[:K], axis=0)  # [K,T_eff,B,A]
+                return jnp.stack(cand[:K], axis=0)  # [K, T_eff, B, A]
+
+
 
         def _rollout_gap_for_actionsK(actionsK_first_step):
             """
@@ -637,7 +682,7 @@ class WorldModel(nj.Module):
                 return jax.scipy.special.logsumexp(gaps / tau, axis=0) * tau  # [T_eff,B]
 
         if (mode == "multi") and (K_actions > 1):
-            base0_eff = actions_seq[0]                                   # [T_eff,B,A/C]
+            base0_eff = actions_seq[0][:T_eff]                                   # [T_eff,B,A/C]
             actionsK  = _build_actions_K(base0_eff, K_actions)           # [K,T_eff,B,A/C]
             trans_gap_eff = _rollout_gap_for_actionsK(actionsK)          # [T_eff,B]
             # For positions where multi-step cannot be computed (last H-1 steps), fall back to one-step
@@ -672,9 +717,12 @@ class WorldModel(nj.Module):
         dT_norm = dT / denom
 
 
-        bisim_pair_loss = ((phi_gap - jax.lax.stop_gradient(dT_norm)) ** 2) * mask
+        # bisim_pair_loss = ((phi_gap - jax.lax.stop_gradient(dT_norm)) ** 2) * mask
+        # losses["bisim_pair"] = bisim_pair_loss.mean()
+        # With Huber:
+        bisim_pair_loss = huber(phi_gap - jax.lax.stop_gradient(dT_norm), delta=1.0) * mask
         losses["bisim_pair"] = bisim_pair_loss.mean()
-        
+                
         #################################################################
 
 
