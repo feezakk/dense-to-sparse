@@ -81,7 +81,7 @@ class Agent(nj.Module):
         (prev_latent, prev_action), task_state, expl_state = state
         embed = self.wm.encoder(obs)
         latent, _ = self.wm.rssm.obs_step(prev_latent, prev_action, embed, obs["is_first"])
-        self.expl_behavior.policy(latent, expl_state)
+        # self.expl_behavior.policy(latent, expl_state)
         task_outs, task_state = self.task_behavior.policy(latent, task_state)
         expl_outs, expl_state = self.expl_behavior.policy(latent, expl_state)
         if mode == "eval":
@@ -565,7 +565,9 @@ class WorldModel(nj.Module):
         # self.dT_ema = 0.99 * self.dT_ema + 0.01 * batch_mean
         new_ema = 0.99 * self.dT_ema.read() + 0.01 * batch_mean
         self.dT_ema.write(new_ema)                # or nj.assign(self.dT_ema, new_ema)
-        dT_norm = dT / (self.dT_ema.read() + 1e-6)
+        # dT_norm = dT / (self.dT_ema.read() + 1e-6)
+        dT_norm = jnp.clip(dT / (self.dT_ema.read() + 1e-6), a_min=0.0, a_max=self.config.get("bisim_target_clip", 10.0))
+
 
         pred = self.bisim_calib(phi_now_gap)
         err   = pred - jax.lax.stop_gradient(dT_norm)
