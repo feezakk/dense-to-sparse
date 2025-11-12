@@ -639,8 +639,8 @@ class CarlaLaneFollowingStudentEnv(gym.Env):
             "image": camera_space,
             "collision": collision_space,
             "lane_invasion": lane_invasion_space,
-            "achieved_goal": goal_space, 
-            "desired_goal": goal_space,
+            # "achieved_goal": goal_space, 
+            # "desired_goal": goal_space,
         })
 
     # --------------------------------------------------------------------------

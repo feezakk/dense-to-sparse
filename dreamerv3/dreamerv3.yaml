@@ -166,16 +166,22 @@ defaults:
       actor: 1.0,
       critic: 1.0,
       slowreg: 1.0,
-      posterior_deter_kl: 5.0,
-      posterior_stoch_kl: 5.0,
-      prior_deter_kl: 5.0,
-      prior_stoch_kl: 5.0,
+      posterior_deter_kl: 1.0,
+      posterior_stoch_kl: 1.0,
+      prior_deter_kl: 1.0,
+      prior_stoch_kl: 1.0,
       dist_loss_imagined: 1.0 ,
       dist_deter_imagined: 1.0,
       dist_stoch_imagined: 1.0,
-      posterior_kl: 5.0,
-      prior_kl: 5.0,
-      bisim_pair: 0.5   # start in [0.25, 1.0]      
+      posterior_kl: 1.0,
+      prior_kl: 1.0,
+      bisim_pair: 1.0,   # start in [0.25, 1.0]  
+      bisim_imag_reward_mse: 1.0,
+      bisim_imag_next_kl: 1.0,
+      bisim_imag_next_deter: 1.0,
+
+
+
     }
 
   # --- bisimulation target (teacher) ---
