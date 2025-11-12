@@ -860,28 +860,63 @@ class WorldModel(nj.Module):
         H_eff  = max(1, min(H, T))
         T_eff  = T - (H_eff - 1)
 
+        # def _rollout_phi_gap_piT(s_i0, s_j0, t_i_fix, t_j_fix, H_, key):
+        #     """Roll H steps; at each step sample a_i,a_j ~ π_T(t_i_fix),π_T(t_j_fix),
+        #     step **student** states, and accumulate discounted φ-gaps. No teacher stepping inside scan."""
+        #     # Slice to the part where an H-step lookahead fits.
+        #     s_i_eff = jax.tree_map(lambda x: x[:T_eff], s_i0)
+        #     s_j_eff = jax.tree_map(lambda x: x[:T_eff], s_j0)
+        #     t_i_eff = jax.tree_map(lambda x: x[:T_eff], t_i_fix)
+        #     t_j_eff = jax.tree_map(lambda x: x[:T_eff], t_j_fix)
+
+        #     def body(carry, _):
+        #         s_i_cur, s_j_cur, k = carry
+        #         k, k_i, k_j = jax.random.split(k, 3)
+        #         a_i_h = _sample_teacher_actions_TB(t_i_eff, k_i)     # [T_eff,B,A]  (teacher latents fixed)
+        #         a_j_h = _sample_teacher_actions_TB(t_j_eff, k_j)
+        #         s_i_n = _img_step_all(self.rssm, s_i_cur, a_i_h)     # student evolves
+        #         s_j_n = _img_step_all(self.rssm, s_j_cur, a_j_h)
+        #         gap_h = jnp.linalg.norm(_phi_norm(s_i_n) - _phi_norm(s_j_n), axis=-1)  # [T_eff,B]
+        #         return (s_i_n, s_j_n, k), gap_h
+
+        #     (_, _, _), gaps = jax.lax.scan(body, (s_i_eff, s_j_eff, key), None, length=H_)
+        #     h_w = (ms_gamma ** jnp.arange(1, H_ + 1)).reshape(H_, 1, 1)
+        #     return (h_w * gaps).sum(axis=0)  # [T_eff,B]
+        
         def _rollout_phi_gap_piT(s_i0, s_j0, t_i_fix, t_j_fix, H_, key):
-            """Roll H steps; at each step sample a_i,a_j ~ π_T(t_i_fix),π_T(t_j_fix),
-            step **student** states, and accumulate discounted φ-gaps. No teacher stepping inside scan."""
-            # Slice to the part where an H-step lookahead fits.
-            s_i_eff = jax.tree_map(lambda x: x[:T_eff], s_i0)
-            s_j_eff = jax.tree_map(lambda x: x[:T_eff], s_j0)
-            t_i_eff = jax.tree_map(lambda x: x[:T_eff], t_i_fix)
-            t_j_eff = jax.tree_map(lambda x: x[:T_eff], t_j_fix)
+            """Closed-loop π_T: at each step sample actions from CURRENT teacher latents,
+            step both teacher and student latents, accumulate discounted φ-gap."""
+            # Slice to horizon-aligned prefix
+            s_i = jax.tree_map(lambda x: x[:T_eff], s_i0)
+            s_j = jax.tree_map(lambda x: x[:T_eff], s_j0)
+            t_i = jax.tree_map(lambda x: x[:T_eff], t_i_fix)
+            t_j = jax.tree_map(lambda x: x[:T_eff], t_j_fix)
 
-            def body(carry, _):
-                s_i_cur, s_j_cur, k = carry
+            acc  = jnp.zeros(s_i["deter"].shape[:2], dtype=s_i["deter"].dtype)  # [T_eff,B]
+            disc = 1.0
+            k = key
+
+            # Use a Python loop to avoid tracer leaks from any internal nj.rng().
+            for _ in range(H_):
                 k, k_i, k_j = jax.random.split(k, 3)
-                a_i_h = _sample_teacher_actions_TB(t_i_eff, k_i)     # [T_eff,B,A]  (teacher latents fixed)
-                a_j_h = _sample_teacher_actions_TB(t_j_eff, k_j)
-                s_i_n = _img_step_all(self.rssm, s_i_cur, a_i_h)     # student evolves
-                s_j_n = _img_step_all(self.rssm, s_j_cur, a_j_h)
-                gap_h = jnp.linalg.norm(_phi_norm(s_i_n) - _phi_norm(s_j_n), axis=-1)  # [T_eff,B]
-                return (s_i_n, s_j_n, k), gap_h
 
-            (_, _, _), gaps = jax.lax.scan(body, (s_i_eff, s_j_eff, key), None, length=H_)
-            h_w = (ms_gamma ** jnp.arange(1, H_ + 1)).reshape(H_, 1, 1)
-            return (h_w * gaps).sum(axis=0)  # [T_eff,B]
+                # Actions from CURRENT teacher latents (closed-loop)
+                a_i = _sample_teacher_actions_TB(t_i, k_i)      # [T_eff,B,A]
+                a_j = _sample_teacher_actions_TB(t_j, k_j)      # [T_eff,B,A]
+
+                # Step STUDENT latents (these feed φ)
+                s_i = _img_step_all(self.rssm,            s_i, a_i)
+                s_j = _img_step_all(self.rssm,            s_j, a_j)
+
+                # Step TEACHER latents (to recondition π_T next step)
+                t_i = _img_step_all(self.teacher_wm.rssm, t_i, a_i)
+                t_j = _img_step_all(self.teacher_wm.rssm, t_j, a_j)
+
+                disc = disc * ms_gamma
+                acc  = acc + disc * jnp.linalg.norm(_phi_norm(s_i) - _phi_norm(s_j), axis=-1)  # [T_eff,B]
+            return acc  # [T_eff,B]
+
+        
 
         if mode == "multi":
             if K_actions > 1:
