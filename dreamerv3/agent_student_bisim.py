@@ -508,6 +508,10 @@ class WorldModel(nj.Module):
         losses["prior_stoch_kl"] = prior_kl_per_group.mean()
         losses["prior_deter_kl"] = jnp.mean((teacher_prior["deter"] - prior["deter"]) ** 2)
 
+        def _phi_norm(feat):
+            z = self.phi_head(feat).mean()
+            return z / (jnp.linalg.norm(z, axis=-1, keepdims=True) + 1e-6)  # [T,B,Dφ]
+
         ####################################################################################
         # ---- Bisimulation-style pairwise loss (teacher-targeted, student embedding) ----
         ####################################################################################
@@ -534,19 +538,56 @@ class WorldModel(nj.Module):
             return a_flat.reshape((T_, B_, -1))                  # [T, B, A]
         
 
+        def _img_step_all(rssm, prev_latent, actions):
+            """prev_latent keys [T_eff,B,...], actions [T_eff,B,A] -> next_latent [T_eff,B,...]."""
+            TB = prev_latent["deter"].shape[0] * prev_latent["deter"].shape[1]
+            prev_flat = jax.tree_map(lambda x: x.reshape((TB,) + x.shape[2:]), prev_latent)
+            a_flat    = actions.reshape((TB, -1))
+            nxt_flat  = rssm.img_step(prev_flat, a_flat)
+            return jax.tree_map(lambda x: x.reshape(prev_latent["deter"].shape[:2] + x.shape[1:]), nxt_flat)
+
+        
+
         # 1) Teacher "next-latent" (one-step prior)
-        t_deter = teacher_prior["deter"]                          # [T,B,Dd]
-        t_probs = jax.nn.softmax(teacher_prior["stoch"], -1)      # [T,B,G,C]
+        # t_deter = teacher_prior["deter"]                          # [T,B,Dd]
+        # t_probs = jax.nn.softmax(teacher_prior["stoch"], -1)      # [T,B,G,C]
 
         # 2) Create O(B) pairs by a permutation (per time step)
-        B = t_deter.shape[1]
+        # B = t_deter.shape[1]
+        B = post["deter"].shape[1]
         perm = jax.random.permutation(nj.rng(), B)
 
-        # 3) Student embedding phi(s) from posterior (current state)
-        raw_phi = self.phi_head(feats).mean()               # [T,B,D]
-        phi_s   = raw_phi / (jnp.linalg.norm(raw_phi, axis=-1, keepdims=True) + 1e-6)
-        phi_i, phi_j = phi_s, phi_s[:, perm]
-        phi_gap = jnp.linalg.norm(phi_i - phi_j, axis=-1)
+        # Student current latents (paired within batch)
+        s_i = post
+        s_j = jax.tree_map(lambda x: x[:, perm], post)
+
+        # Teacher current latents (only for sampling actions)
+        t_i = teacher_post
+        t_j = jax.tree_map(lambda x: x[:, perm], teacher_post)
+
+        # Sample teacher actions under π_T for each branch
+        k_i, k_j = jax.random.split(nj.rng())
+        a_i = _sample_teacher_actions_TB(t_i, k_i)  # [T,B,A]
+        a_j = _sample_teacher_actions_TB(t_j, k_j)  # [T,B,A]
+
+        # Step the **student** dynamics with those actions
+        s_i_next = _img_step_all(self.rssm, s_i, a_i)  # [T,B,...]
+        s_j_next = _img_step_all(self.rssm, s_j, a_j)
+
+        # φ-gaps (now and next)
+        phi_now_i   = _phi_norm(s_i)        # [T,B,Dϕ] -> after norm L2 over last axis
+        phi_now_j   = _phi_norm(s_j)
+        phi_now_gap = jnp.linalg.norm(phi_now_i - phi_now_j, axis=-1)  # [T,B]
+
+        phi_next_i  = _phi_norm(s_i_next)
+        phi_next_j  = _phi_norm(s_j_next)
+        trans_gap   = jnp.linalg.norm(phi_next_i - phi_next_j, axis=-1)  # [T,B]
+
+        # # 3) Student embedding phi(s) from posterior (current state)
+        # raw_phi = self.phi_head(feats).mean()               # [T,B,D]
+        # phi_s   = raw_phi / (jnp.linalg.norm(raw_phi, axis=-1, keepdims=True) + 1e-6)
+        # phi_i, phi_j = phi_s, phi_s[:, perm]
+        # phi_gap = jnp.linalg.norm(phi_i - phi_j, axis=-1)
 
 
         # 4) Teacher bisimulation target d_T(i,j)
@@ -566,8 +607,8 @@ class WorldModel(nj.Module):
         # Normalize shape to [T, B] for downstream indexing
         if r_pred.ndim == 3 and r_pred.shape[-1] == 1:
             r_pred = r_pred[..., 0]                      # [T, B]
-        elif r_pred.ndim == 1:
-            r_pred = r_pred.reshape(T, B)                # [T*B] -> [T, B]
+        # elif r_pred.ndim == 1:
+        #     r_pred = r_pred.reshape(T, B)                # [T*B] -> [T, B]
         elif r_pred.ndim != 2:
             r_pred = r_pred.reshape(T, B)                # any odd case -> [T, B]
 
@@ -606,14 +647,6 @@ class WorldModel(nj.Module):
             a = jnp.abs(x)
             return jnp.where(a <= delta, 0.5 * x * x, delta * (a - 0.5 * delta))
 
-        def _img_step_all(rssm, prev_latent, actions):
-            """prev_latent keys [T_eff,B,...], actions [T_eff,B,A] -> next_latent [T_eff,B,...]."""
-            TB = prev_latent["deter"].shape[0] * prev_latent["deter"].shape[1]
-            prev_flat = jax.tree_map(lambda x: x.reshape((TB,) + x.shape[2:]), prev_latent)
-            a_flat    = actions.reshape((TB, -1))
-            nxt_flat  = rssm.img_step(prev_flat, a_flat)
-            return jax.tree_map(lambda x: x.reshape(prev_latent["deter"].shape[:2] + x.shape[1:]), nxt_flat)
-
         # One-step baseline via img_step from teacher_post using the executed action at t
         # tpost_i, tpost_j = teacher_post, jax.tree_map(lambda x: x[:, perm], teacher_post)
         # nxt_i = _img_step_all(self.teacher_wm.rssm, tpost_i, teacher_data["action"][:T])  # [T,B,...]
@@ -642,7 +675,7 @@ class WorldModel(nj.Module):
 
 
         # --- Multi-step machinery works on T_eff so we can look ahead H steps ---
-        T = t_deter.shape[0]
+        T = post["deter"].shape[0]
         T_eff = T if H <= 1 else (T - (H - 1))
         # Slice everything to T_eff when doing multi-step
         teacher_post_eff = jax.tree_map(lambda x: x[:T_eff], teacher_post)
@@ -829,8 +862,18 @@ class WorldModel(nj.Module):
         # if mask.ndim == 3 and mask.shape[-1] == 1:
         #     mask = mask.squeeze(-1)  # [T,B]
 
-        mask = (1.0 - teacher_data["is_terminal"].astype(jnp.float32)) * (1.0 - teacher_data["is_first"].astype(jnp.float32))
-        mask = mask.squeeze(-1) if mask.ndim == 3 and mask.shape[-1] == 1 else mask   
+        # mask = (1.0 - teacher_data["is_terminal"].astype(jnp.float32)) * (1.0 - teacher_data["is_first"].astype(jnp.float32))
+        # mask = mask.squeeze(-1) if mask.ndim == 3 and mask.shape[-1] == 1 else mask 
+
+        mask_s = (1.0 - data["is_terminal"].astype(jnp.float32)) * (1.0 - data["is_first"].astype(jnp.float32))
+        mask_t = (1.0 - teacher_data["is_terminal"].astype(jnp.float32)) * (1.0 - teacher_data["is_first"].astype(jnp.float32))
+        if mask_s.ndim == 3 and mask_s.shape[-1] == 1:
+            mask_s = mask_s.squeeze(-1)
+        if mask_t.ndim == 3 and mask_t.shape[-1] == 1:
+            mask_t = mask_t.squeeze(-1)
+        mask = mask_s * mask_t  # [T,B]
+
+
         dT  = dT  * mask
 
         batch_mean = (jnp.sum(dT * mask) / (jnp.sum(mask) + 1e-6))
@@ -843,11 +886,11 @@ class WorldModel(nj.Module):
         # bias  = self.bisim_bias.value
         # pred  = scale * phi_gap + bias
 
-        pred = self.bisim_calib(phi_gap)
+        pred = self.bisim_calib(phi_now_gap)
         err   = pred - jax.lax.stop_gradient(dT_norm)
         losses["bisim_pair"] = (huber(err, 1.0) * mask).mean()
 
-        bisim_pair_loss = huber(phi_gap - jax.lax.stop_gradient(dT_norm), delta=1.0) * mask
+        bisim_pair_loss = huber(phi_now_gap - jax.lax.stop_gradient(dT_norm), delta=1.0) * mask
                 
         ###############################################################################################################
 
@@ -919,14 +962,14 @@ class WorldModel(nj.Module):
         # x = phi_gap * valid + (1 - valid) * 0.0  # or use jnp.where(valid, phi_gap, 0)
         # y = dT * valid
 
-        w = mask.astype(phi_gap.dtype)
+        w = mask.astype(phi_now_gap.dtype)
         wsum = jnp.sum(w) + 1e-8
 
-        x_mean = jnp.sum(w * phi_gap) / wsum
+        x_mean = jnp.sum(w * phi_now_gap) / wsum
         y_mean = jnp.sum(w * dT) / wsum
-        x_std  = jnp.sqrt(jnp.sum(w * (phi_gap - x_mean)**2) / wsum + 1e-8)
+        x_std  = jnp.sqrt(jnp.sum(w * (phi_now_gap - x_mean)**2) / wsum + 1e-8)
         y_std  = jnp.sqrt(jnp.sum(w * (dT      - y_mean)**2) / wsum + 1e-8)
-        cov_xy = jnp.sum(w * (phi_gap - x_mean) * (dT - y_mean)) / wsum
+        cov_xy = jnp.sum(w * (phi_now_gap - x_mean) * (dT - y_mean)) / wsum
         metrics["bisim_pair_corr"] = cov_xy / (x_std * y_std + 1e-8)
 
         metrics["bisim_phi_gap_mean"] = x_mean
@@ -950,7 +993,7 @@ class WorldModel(nj.Module):
         
         # metrics["bisim_pair_spearman"] = _spearman_masked(x, y)
 
-        dtype = phi_gap.dtype
+        dtype = phi_now_gap.dtype
         metrics["bisim_mode"] = jnp.asarray(1.0 if mode == "multi" else 0.0, dtype)
         metrics["bisim_K"]    = jnp.asarray(float(K_actions), dtype)
         metrics["bisim_ms_H"] = jnp.asarray(float(H), dtype)
