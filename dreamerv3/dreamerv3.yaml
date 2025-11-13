@@ -175,8 +175,6 @@ defaults:
       dist_loss_imagined: 1.0 ,
       dist_deter_imagined: 1.0,
       dist_stoch_imagined: 1.0,
-      posterior_kl: 1.0,
-      prior_kl: 1.0,
       bisim_pair: 0.5,   # start in [0.25, 1.0]  
       bisim_imag_reward_mse: 0.5,
       bisim_imag_next_kl: 0.1,
@@ -206,6 +204,9 @@ defaults:
   bisim_alpha_r: 1.0
   bisim_w_deter: 1.0
   bisim_w_stoch: 1.0
+
+  bisim_ms_gamma: 0.99         # discount inside multi-step transition gap
+  bisim_target_clip: 10.0    # clip for bisim target d_T
 
   bisim_dim: 128
   phi_head:
