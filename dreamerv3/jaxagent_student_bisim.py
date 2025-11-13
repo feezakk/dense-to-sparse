@@ -238,7 +238,7 @@ class JAXAgent(embodied.Agent):
         data = self._convert_inps(data, self.train_devices)
         teacher_data = self._convert_inps(teacher_data, self.train_devices)
         state, varibs = self._init_train(varibs, rng, data["is_first"])
-        teacher_state, _= None
+        teacher_state = None
         # print("data:", jax.device_get(data.keys())) 
         varibs = self._train(varibs, rng, data, teacher_data,state,teacher_state,init_only=True)
         # obs = self._dummy_batch(obs_space, (1,))
