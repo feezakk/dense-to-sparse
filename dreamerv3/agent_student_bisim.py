@@ -427,7 +427,8 @@ class WorldModel(nj.Module):
             # 1) Starting latent is the first latent in the provided student traj.
             #    It is treated as a constant; gradients flow through transitions.
             rssm_keys = list(self.rssm.initial(1).keys())  # typically ["deter","stoch","logit"]
-            s0 = {k: traj[k][0] for k in rssm_keys if k in traj}  # [B, ...]
+            # s0 = {k: traj[k][0] for k in rssm_keys if k in traj}  # [B, ...]
+            s0 = jax.tree_map(jax.lax.stop_gradient, {k: traj[k][0] for k in rssm_keys if k in traj})
             # 2) Do not propagate gradients to the ACTOR through actions here.
             a_seq = jax.lax.stop_gradient(traj["action"][:-1])    # [T,B,A]
             s_recon = self.imagine_with_actions(s0, a_seq)        # latents [T+1,B,...], "action":[T,B,A]
@@ -453,7 +454,9 @@ class WorldModel(nj.Module):
             t_next = {k: sg(v[1:]) for k, v in teacher_traj.items() if k in ("stoch","logit","deter")}
             s_next_dist = self.rssm.get_dist(s_next)
             t_next_dist = self.teacher_wm.rssm.get_dist(t_next)
-            losses["bisim_imag_next_kl"] = s_next_dist.kl_divergence(t_next_dist).mean()
+            # losses["bisim_imag_next_kl"] = s_next_dist.kl_divergence(t_next_dist).mean()
+            losses["bisim_imag_next_kl"] = t_next_dist.kl_divergence(s_next_dist).mean()
+
             if "deter" in s_next and "deter" in t_next:
                 losses["bisim_imag_next_deter"] = jnp.mean((s_next["deter"] - t_next["deter"]) ** 2)
 
@@ -464,56 +467,107 @@ class WorldModel(nj.Module):
                 z = self.phi_head(feat).mean()
                 return z / (jnp.linalg.norm(z, axis=-1, keepdims=True) + 1e-6)
 
+            # Transition gap on TEACHER NEXT latents (stop-grad teacher)
+            def _phi_norm_T_no_grad(featT):
+                z = self.phi_head(featT).mean()
+                z = jax.lax.stop_gradient(z)
+                return z / (jnp.linalg.norm(z, axis=-1, keepdims=True) + 1e-6)
+            
+            def huber(x, delta=1.0):
+                a = jnp.abs(x)
+                return jnp.where(a <= delta, 0.5 * x * x, delta * (a - 0.5 * delta))
+            
+            def _shift_back(x, k):
+                """Return time-shifted x[t] = orig[t+k] for t < T-k, else 0."""
+                pad = jnp.zeros((k,) + x.shape[1:], dtype=x.dtype)
+                return jnp.concatenate([x[k:], pad], axis=0)
+            
+            K = int(getattr(self.config, "bisim_ms_steps", 4))
+            alpha_r = float(getattr(self.config, "bisim_alpha_r", 1.0))
+            gamma_bisim = float(getattr(self.config, "bisim_gamma", 0.99))
+            gamma_ms = float(getattr(self.config, "bisim_ms_gamma", gamma_bisim))
+            clip = float(getattr(self.config, "bisim_target_clip", 10.0))
+
             # Use CURRENT student latents at time t (exclude the last latent)
             s_now = {k: v[:-1] for k, v in s_recon.items() if k in ("deter","stoch","logit")}  # [T,B,...]
             B = s_now["deter"].shape[1]
             perm = jax.random.permutation(nj.rng(), B)
+
             s_i = s_now
             s_j = jax.tree_map(lambda x: x[:, perm], s_now)
 
             phi_now_gap = jnp.linalg.norm(_phi_norm(s_i) - _phi_norm(s_j), axis=-1)  # [T,B]
-
             # Teacher reward difference at t (teacher under SAME actions)
             t_rew_full = self.teacher_wm.heads["reward"](jax.tree_map(sg, teacher_traj)).mean()
             if t_rew_full.ndim == 3 and t_rew_full.shape[-1] == 1:
                 t_rew_full = t_rew_full[..., 0]
             if t_rew_full.shape[0] == teacher_traj["action"].shape[0] + 1:
                 t_rew_full = t_rew_full[:-1]
-            dR = jnp.abs(t_rew_full - jnp.take(t_rew_full, perm, axis=1))  # [T,B]
-
-            # Transition gap on TEACHER NEXT latents (stop-grad teacher)
-            def _phi_norm_T_no_grad(featT):
-                z = self.phi_head(featT).mean()
-                z = jax.lax.stop_gradient(z)
-                return z / (jnp.linalg.norm(z, axis=-1, keepdims=True) + 1e-6)
-
-            t_next_i = jax.tree_map(lambda x: sg(x)[1:], teacher_traj)       # [T,B,...]
-            t_next_j = jax.tree_map(lambda x: sg(x)[1:, perm], teacher_traj) # [T,B,...]
-            trans_gap = jnp.linalg.norm(_phi_norm_T_no_grad(t_next_i) - _phi_norm_T_no_grad(t_next_j), axis=-1)  # [T,B]
-
-            alpha_r     = float(getattr(self.config, "bisim_alpha_r", 1.0))
-            gamma_bisim = float(getattr(self.config, "bisim_gamma",    0.99))
-            dT = alpha_r * dR + gamma_bisim * trans_gap  # [T,B]
-
+                
             # Mask with teacher continuation (as weight)
             t_cont = self.teacher_wm.heads["cont"](jax.tree_map(sg, teacher_traj)).mode()
             if t_cont.ndim == 3 and t_cont.shape[-1] == 1:
                 t_cont = t_cont[..., 0]
             if t_cont.shape[0] == teacher_traj["action"].shape[0] + 1:
                 t_cont = t_cont[:-1]
-            mask = t_cont.astype(jnp.float32)  # [T,B]
+
+            
+        
+            t_next_i = jax.tree_map(lambda x: sg(x)[1:], teacher_traj)       # [T,B,...]
+            t_next_j = jax.tree_map(lambda x: sg(x)[1:, perm], teacher_traj) # [T,B,...]                                     # [T,B,Dφ]
+
+            # φ(teacher next) at every step (t+1), used for the transition gap
+            phi_T_next = _phi_norm_T_no_grad(jax.tree_map(lambda x: sg(x)[1:], teacher_traj))  # [T,B,Dφ]
+            phi_T_next_perm = phi_T_next[:, perm]  
+
+            if K <= 1:
+                dR = jnp.abs(t_rew_full - jnp.take(t_rew_full, perm, axis=1))  # [T,B]
+                trans_gap = jnp.linalg.norm(_phi_norm_T_no_grad(t_next_i) - _phi_norm_T_no_grad(t_next_j), axis=-1)  # [T,B]
+                dT = alpha_r * dR + gamma_bisim * trans_gap  # [T,B]
+                mask = t_cont.astype(jnp.float32)  # [T,B]
+
+            else:
+                # ---- multi-step window target ----
+                Ks = jnp.arange(K)
+                k_weights = (gamma_ms ** Ks).astype(jnp.float32)  # [K]
+
+                # Build [K,T,B] tensors for reward diffs, transition gaps, and prefix masks
+                dR_stack = []
+                trans_stack = []
+                cont_stack = []
+                t_rew_perm = jnp.take(t_rew_full, perm, axis=1)  # [T,B]
+
+                for k in range(K):
+                    # reward at t+k for (i, j)
+                    dR_k = jnp.abs(_shift_back(t_rew_full, k) - _shift_back(t_rew_perm, k))  # [T,B]
+                    # transition gap at t+k (uses teacher next-latents)
+                    phi_k     = _shift_back(phi_T_next, k)        # [T,B,Dφ]
+                    phi_k_p   = _shift_back(phi_T_next_perm, k)
+                    trans_k   = jnp.linalg.norm(phi_k - phi_k_p, axis=-1)                    # [T,B]
+                    # prefix continuation mask ∏_{m=0..k} cont[t+m]
+                    cont_k    = _shift_back(t_cont, k)                                       # [T,B]
+
+                    dR_stack.append(dR_k)
+                    trans_stack.append(trans_k)
+                    cont_stack.append(cont_k)
+
+                dR_all      = jnp.stack(dR_stack, 0)          # [K,T,B]
+                trans_all   = jnp.stack(trans_stack, 0)       # [K,T,B]
+                cont_shifts = jnp.stack(cont_stack, 0)        # [K,T,B]
+                mask_all    = jnp.cumprod(cont_shifts, axis=0)  # inclusive product over k
+
+                terms = alpha_r * dR_all + gamma_bisim * trans_all               # [K,T,B]
+                dT = jnp.sum((k_weights[:, None, None] * terms) * mask_all, 0)   # [T,B]
+                mask = cont_shifts[0]                                           # [T,B]
+
 
             # EMA normalization + Huber on calibrated φ-gap
             batch_mean = (jnp.sum(dT * mask) / (jnp.sum(mask) + 1e-6))
             self.dT_ema.write(0.99 * self.dT_ema.read() + 0.01 * batch_mean)
-            clip = float(getattr(self.config, "bisim_target_clip", 10.0))
             dT_norm = jnp.clip(dT / (self.dT_ema.read() + 1e-6), 0.0, clip)
 
             pred = self.bisim_calib(phi_now_gap)  # scale * φ_gap + bias
 
-            def huber(x, delta=1.0):
-                a = jnp.abs(x)
-                return jnp.where(a <= delta, 0.5 * x * x, delta * (a - 0.5 * delta))
 
             err = pred - jax.lax.stop_gradient(dT_norm)
             losses["bisim_pair"] = (huber(err, 1.0) * mask).mean()
