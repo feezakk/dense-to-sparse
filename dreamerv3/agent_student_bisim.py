@@ -15,22 +15,55 @@ class CheckTypesFilter(logging.Filter):
 
 logger.addFilter(CheckTypesFilter())
 
-from . import behaviors_student_bisim, jaxagent_student, jaxutils_student, nets_student
+from . import behaviors_student_bisim, jaxagent_student_bisim, jaxutils_student, nets_student
 from . import ninjax as nj
 
-@jaxagent_student.Wrapper
+@jaxagent_student_bisim.Wrapper
 class Agent(nj.Module):
     def __init__(self, obs_space, act_space, teacher_wm, teacher_policy, step, config):
         self.config = config
         self.obs_space = obs_space
         self.act_space = act_space["action"]
-        self.teacher_wm = teacher_wm
         self.teacher_policy = teacher_policy
         self.step = step
         self.start = None
         self.context = None
-        self.wm = WorldModel(obs_space, act_space, teacher_wm, teacher_policy, self.start, self.context, config, name="wm")
-        self.task_behavior = behaviors_student_bisim.Greedy(self.wm, self.obs_space, self.act_space, teacher_wm, teacher_policy, self.config, name="task_behavior")
+
+         # -------------------------------------------------------------
+        # 1) FROZEN TEACHER WORLD MODEL
+        #    - Separate module name: "teacher_wm"
+        #    - Parameters will live under: "agent/teacher_wm/...".
+        #    - We will copy pretrained teacher.ckpt weights into this.
+        #    - It is NEVER given to any optimizer, so it stays frozen.
+        # -------------------------------------------------------------
+        self.teacher_wm = WorldModel(
+            obs_space,
+            act_space,
+            teacher_wm=None,        # teacher-of-teacher is None
+            teacher_policy=None,    # we don't use a teacher for this module
+            start=None,
+            context=None,
+            config=config,
+            name="teacher_wm",      # <--- distinct namespace
+        )
+
+        # -------------------------------------------------------------
+        # 2) TRAINABLE STUDENT WORLD MODEL
+        #    - Uses self.teacher_wm for distillation/bisimulation.
+        #    - Parameters live under: "agent/wm/...".
+        # -------------------------------------------------------------
+        self.wm = WorldModel(
+            obs_space, 
+            act_space, 
+            self.teacher_wm, 
+            teacher_policy, 
+            self.start, 
+            self.context, 
+            config, 
+            name="wm"
+        )
+
+        self.task_behavior = behaviors_student_bisim.Greedy(self.wm, self.obs_space, self.act_space, self.teacher_wm, teacher_policy, self.config, name="task_behavior")
         self.expl_behavior = self.task_behavior
 
         def print_teacher_params_norm(agent, label):
@@ -59,7 +92,7 @@ class Agent(nj.Module):
             print(f"[{label}] Teacher param norm:", param_norm)
 
         # Print before training
-        print_teacher_params_norm(teacher_wm, label="Before training")
+        print_teacher_params_norm(self.teacher_wm, label="Before training")
 
     def policy_initial(self, batch_size):
         return (
@@ -240,11 +273,43 @@ class WorldModel(nj.Module):
     def initial(self, batch_size):
         prev_latent = self.rssm.initial(batch_size)
         prev_action = jnp.zeros((batch_size, *self.act_space.shape))
+
+        # Ensure φ-head and bisim_calib parameters exist during the creation pass.
+        # This runs when JAXAgent._init_varibs calls train_initial -> wm.initial.
+        # if nj.creating():
+        #     # Create dT_ema in the state.
+        #     # _ = self.dT_ema.read()
+        #     # φ-head: it expects a dict with "deter" (same as in loss)
+        #     dummy_post = {"deter": prev_latent["deter"]}
+        #     _ = self.phi_head(dummy_post).mean()
+
+        #     # BisimCalib: only cares about shape; [T,B] vs [1,B] is fine
+        #     dummy_gap = jnp.zeros((1, batch_size), dtype=jnp.float32)
+        #     _ = self.bisim_calib(dummy_gap)
+
         return prev_latent, prev_action
         
 
     def train(self, data, teacher_data, state,teacher_state,traj=None, teacher_traj=None,pcb_only=False):
         modules = [self.encoder, self.rssm, self.phi_head, self.bisim_calib, *self.heads.values()]
+
+        # # --- Creation pass: called from _init_varibs (create=True) ---
+        # # Here the NinJAX state is still being constructed.
+        # # We must ensure that each module in `modules` has at least one
+        # # state entry *before* nj.grad tries to query it via mod.getm().
+        # if nj.creating():
+        #     # Forward-only pass to instantiate encoder/rssm/heads, etc.
+        #     # We ignore the outputs; we only care about side effects on state.
+        #     _ = self.loss(
+        #         traj,
+        #         teacher_traj,
+        #         data,
+        #         teacher_data,
+        #         state,
+        #         teacher_state,
+        #         pcb_only=pcb_only,
+        #     )
+        
         mets, (state, teacher_state, outs, metrics) = self.opt(
             modules, self.loss, 
             data, teacher_data, state,teacher_state, 
@@ -316,6 +381,21 @@ class WorldModel(nj.Module):
         teacher_prior = jax.tree_map(sg, teacher_prior)
         post, prior = self.rssm.observe(embed, prev_actions, data["is_first"], prev_latent)
 
+        # --- Ensure bisim-specific modules have parameters on first create pass ---
+        if nj.creating():
+            # 1) scalar EMA
+            _ = self.dT_ema.read()
+
+            # 2) φ-head
+            # Use post['deter'] so shapes are realistic.
+            dummy_feat = {"deter": post["deter"]}
+            _ = self.phi_head(dummy_feat).mean()
+
+            # 3) calibration head
+            dummy_gap = jnp.zeros(post["deter"].shape[:2], dtype=jnp.float32)  # [T, B]
+            _ = self.bisim_calib(dummy_gap)
+        # -------------------------------------------------------------------------
+
         dists = {}
         feats = {**post, "embed": embed}
         for name, head in self.heads.items():
@@ -324,21 +404,21 @@ class WorldModel(nj.Module):
             dists.update(out)
         losses = {}
 
-        # ------------------------------------------------------------------
-        # Ensure phi_head and bisim_calib have created parameters even in
-        # the data-only pass (traj=None, teacher_traj=None).
-        # This prevents ninjax.getm() from seeing an “empty” module.
-        # ------------------------------------------------------------------
-        # 1) Call phi_head once on real latents (uses 'deter' inside).
-        _ = self.phi_head(post).mean()
+        # # ------------------------------------------------------------------
+        # # Ensure phi_head and bisim_calib have created parameters even in
+        # # the data-only pass (traj=None, teacher_traj=None).
+        # # This prevents ninjax.getm() from seeing an “empty” module.
+        # # ------------------------------------------------------------------
+        # # 1) Call phi_head once on real latents (uses 'deter' inside).
+        # _ = self.phi_head(post).mean()
 
-        # 2) Call bisim_calib on a dummy gap tensor with [T,B] shape.
-        dummy_gap = jnp.zeros(post["deter"].shape[:2], dtype=jnp.float32)
-        _ = self.bisim_calib(dummy_gap)
-        # ------------------------------------------------------------------
+        # # 2) Call bisim_calib on a dummy gap tensor with [T,B] shape.
+        # dummy_gap = jnp.zeros(post["deter"].shape[:2], dtype=jnp.float32)
+        # _ = self.bisim_calib(dummy_gap)
+        # # ------------------------------------------------------------------
 
-        # dists = {}
-        # feats = {**post, "embed": embed}
+        # # dists = {}
+        # # feats = {**post, "embed": embed}
 
 
         losses["dyn"] = self.rssm.dyn_loss(post, prior, **self.config.dyn_loss)

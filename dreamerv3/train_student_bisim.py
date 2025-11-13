@@ -112,59 +112,89 @@ def main(argv=None):
 
     tp = teacher_agent.agent.task_behavior.ac.policy
     teacher_wm = teacher_agent.agent.wm
+
+
+    # teacher_state = teacher_agent.save()
+
     agent = dreamerv3.agent_student_bisim(env.obs_space, env.act_space, teacher_wm, tp,  step, dreamerv3_config)  
 
-    # # ----------------------------------------
-    # # Copy teacher world model parameters into the student's teacher_wm subtree
-    # # ----------------------------------------
+    # ---------- NEW BLOCK ----------
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    
+    teacher_vars = teacher_agent.save()
+    student_vars = agent.save()
 
-    # # 1) Dump parameter trees
-    # teacher_vars = teacher_agent.save()   # tree: { "agent/wm/...": array, ... }
-    # student_vars = agent.save()           # tree: { "agent/...", "agent/teacher_wm/...", ... }
+    # Map teacher world model weights "agent/wm/*" -> student's frozen "agent/teacher_wm/*"
+    copied = 0
+    for k, v in teacher_vars.items():
+        if k.startswith("agent/wm/"):
+            # Teacher: agent/wm/enc/..., agent/wm/rssm/..., etc.
+            # Student frozen teacher: agent/teacher_wm/enc/..., agent/teacher_wm/rssm/..., etc.
+            k_student = k.replace("agent/wm/", "agent/teacher_wm/")
+            if k_student in student_vars and isinstance(v, (np.ndarray, jnp.ndarray)):
+                student_vars[k_student] = v
+                copied += 1
 
-    # def copy_teacher_wm_into_student(teacher_vars, student_vars):
-    #     teacher_prefix = "agent/wm/"
-    #     student_prefix = "agent/teacher_wm/"
+    print(f"[WM copy] Copied {copied} tensors from teacher.wm -> student.teacher_wm.")
 
-    #     num_copied = 0
+    agent.load(student_vars)
 
-    #     for k, v in teacher_vars.items():
-    #         if not k.startswith(teacher_prefix):
-    #             continue
-    #         suffix = k[len(teacher_prefix):]           # path inside wm
-    #         dst_key = student_prefix + suffix          # corresponding key under teacher_wm
+    # # Correct prefix (no leading slash!)
+    # # TEACHER_WM_PREFIX = "agent/wm/"
+    # WM_WEIGHT_PREFIXES = [
+    #     "agent/wm/enc/",
+    #     "agent/wm/rssm/",
+    #     "agent/wm/dec/",
+    #     "agent/wm/rew/",
+    #     "agent/wm/cont/",
+    # ]
 
-    #         if dst_key in student_vars:
-    #             student_vars[dst_key] = v
-    #             num_copied += 1
-    #         else:
-    #             # Optional: debug print if you'd like to sanity check
-    #             print(f"[WARN] No matching key in student for teacher key {k}")
+    # def _is_wm_weight_key(k: str) -> bool:
+    #     return any(k.startswith(p) for p in WM_WEIGHT_PREFIXES)
 
-    #     # Optional: sanity check
-    #     # print(f"[INFO] Copied {num_copied} teacher_wm parameters into student.teacher_wm")
-    #     return student_vars
+    # import numpy as np
+    # import jax.numpy as jnp
 
-    # student_vars = copy_teacher_wm_into_student(teacher_vars, student_vars)
+    # copied = 0
+    # for k, v in teacher_vars.items():
+    #     if _is_wm_weight_key(k) and isinstance(v, (np.ndarray, jnp.ndarray)):
+    #         student_vars[k] = v
+    #         copied += 1
 
-    # # 2) Load back into student agent and sync to devices
+    print("***************************************************************")
+    print(f"[WM copy] Copied {copied} teacher WM tensors into student WM.")
+    print("***************************************************************")
     # agent.load(student_vars)
-    # agent.sync()   # if your JAXAgent has sync() for multi-device; no-op otherwise
 
-    # t_vars = teacher_agent.save()
-    # s_vars = agent.save()
+    # ---------- END NEW BLOCK ----------
 
-    # def subtree_norm(vars, prefix):
-    #     import jax.numpy as jnp
-    #     arrays = [v.reshape(-1) for k, v in vars.items() if k.startswith(prefix)]
-    #     return float(jnp.linalg.norm(jnp.concatenate(arrays))) if arrays else 0.0
+    # Optional sanity check: compare L2 norms of WM parameters
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
 
-    # teacher_wm_norm  = subtree_norm(t_vars, "agent/wm/")
-    # student_tw_norm  = subtree_norm(s_vars, "agent/teacher_wm/")
+    def param_norm(agent_obj, label):
+        vars_dict = agent_obj.save()
 
-    # print("teacher wm  norm:", teacher_wm_norm)
-    # print("student teacher_wm norm:", student_tw_norm)
+        # Only take arrays belonging to the world model.
+        wm_arrays = [
+            v
+            for k, v in vars_dict.items()
+            if k.startswith("agent/wm/") and isinstance(v, (np.ndarray, jnp.ndarray))
+        ]
 
+        if not wm_arrays:
+            print(f"[{label}] No agent/wm/ parameter arrays found.")
+            return
+
+        flat = jnp.concatenate([jnp.ravel(jnp.asarray(v)) for v in wm_arrays])
+        norm = jnp.sqrt(jnp.sum(flat ** 2))
+        print(f"[{label}] ||agent/wm||_2 = {float(norm):.6e}")
+
+        param_norm(teacher_agent, "Teacher")
+        param_norm(agent, "Student (after copy)")
 
 
     replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "replay")
