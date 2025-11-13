@@ -9,6 +9,9 @@ import dreamerv3
 
 warnings.filterwarnings("ignore", ".*truncated to dtype int32.*")
 
+from jax import config
+config.update("jax_transfer_guard", "allow")  # or "log" / "warn"
+
 
 def wrap_env(env, config):
     args = config.wrapper
@@ -122,7 +125,7 @@ def main(argv=None):
     import jax
     import jax.numpy as jnp
     import numpy as np
-    
+
     teacher_vars = teacher_agent.save()
     student_vars = agent.save()
 
@@ -175,6 +178,24 @@ def main(argv=None):
     import jax.numpy as jnp
     import numpy as np
 
+    # def param_norm(agent_obj, label):
+    #     vars_dict = agent_obj.save()
+
+    #     # Only take arrays belonging to the world model.
+    #     wm_arrays = [
+    #         v
+    #         for k, v in vars_dict.items()
+    #         if k.startswith("agent/wm/") and isinstance(v, (np.ndarray, jnp.ndarray))
+    #     ]
+
+    #     if not wm_arrays:
+    #         print(f"[{label}] No agent/wm/ parameter arrays found.")
+    #         return
+
+    #     flat = jnp.concatenate([jnp.ravel(jnp.asarray(v)) for v in wm_arrays])
+    #     norm = jnp.sqrt(jnp.sum(flat ** 2))
+    #     print(f"[{label}] ||agent/wm||_2 = {float(norm):.6e}")
+
     def param_norm(agent_obj, label):
         vars_dict = agent_obj.save()
 
@@ -189,12 +210,15 @@ def main(argv=None):
             print(f"[{label}] No agent/wm/ parameter arrays found.")
             return
 
-        flat = jnp.concatenate([jnp.ravel(jnp.asarray(v)) for v in wm_arrays])
-        norm = jnp.sqrt(jnp.sum(flat ** 2))
-        print(f"[{label}] ||agent/wm||_2 = {float(norm):.6e}")
+        # Explicitly move to host to avoid implicit device->host transfer
+        host_arrays = [np.ravel(jax.device_get(v)) for v in wm_arrays]
+        flat = np.concatenate(host_arrays)
+        norm = np.linalg.norm(flat)
 
-        param_norm(teacher_agent, "Teacher")
-        param_norm(agent, "Student (after copy)")
+        print(f"[{label}] ||agent/wm||_2 = {norm:.6e}")
+
+    param_norm(teacher_agent, "Teacher")
+    param_norm(agent, "Student (after copy)")
 
 
     replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "replay")

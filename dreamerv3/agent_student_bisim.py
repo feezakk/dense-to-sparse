@@ -424,9 +424,9 @@ class WorldModel(nj.Module):
         losses["dyn"] = self.rssm.dyn_loss(post, prior, **self.config.dyn_loss)
         losses["rep"] = self.rssm.rep_loss(post, prior, **self.config.rep_loss)
         for key, dist in dists.items():
-            target = (teacher_data[key] if key == "reward"
-                      else data[key])
-            loss = -dist.log_prob(target.astype(jnp.float32))
+            # target = (teacher_data[key] if key == "reward" else data[key])
+            target = data[key].astype(jnp.float32)
+            loss = -dist.log_prob(target)
             # loss = -dist.log_prob(data[key].astype(jnp.float32))
             assert loss.shape == embed.shape[:2], (key, loss.shape)
             losses[key] = loss
