@@ -106,7 +106,7 @@ class Agent(nj.Module):
         # No traj/teacher_traj passed here => no bisim losses in this phase.
         # ------------------------------------------------------------------
 
-        state, teacher_state, wm_outs, mets = self.wm.train(data, teacher_data, state,teacher_state,traj, teacher_traj)
+        state, teacher_state, wm_outs, mets = self.wm.train(data, teacher_data, state,teacher_state,traj=None, teacher_traj=None)
         metrics.update(mets)
 
         # ------------------------------------------------------------------
@@ -409,8 +409,7 @@ class WorldModel(nj.Module):
 
             losses = {k: v for k, v in losses.items() if _keep_pcb(k)}
 
-        scaled = {k: v * self.scales[k] for k, v in losses.items()}
-        model_loss = sum(scaled.values())
+        
 
         out = {"embed": embed, "post": post, "prior": prior, "teacher_embed": teacher_embed, "teacher_post": teacher_post, "teacher_prior": teacher_prior}
         out.update({f"{k}_loss": v for k, v in losses.items()})
@@ -603,7 +602,8 @@ class WorldModel(nj.Module):
             distill["wm/imag_deter_mse"]  = losses["dist_deter_imagined"]
 
         
-
+        scaled = {k: v * self.scales[k] for k, v in losses.items()}
+        model_loss = sum(scaled.values())
         metrics = self._metrics(data, dists, post, prior, losses, model_loss)
         metrics["model_loss_raw"] = model_loss  # Store model loss for Curious Replay prioritization
 
