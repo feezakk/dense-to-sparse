@@ -157,7 +157,7 @@ def train(agent, teacher_policy, env, eval_env, replay, eval_replay, teacher_rep
                 # Change 11/4/2025 19:46 PM
                 #########################################
                 # teacher_batch[0] = next(teacher_dataset)
-                teacher_batch[0] = next(teacher_dataset)
+                teacher_batch[0] = batch[0]  # Using same batch for teacher and student
                 ##############################################
                 # End Change 11/2/2025 2:50 PM
                 ##############################################
