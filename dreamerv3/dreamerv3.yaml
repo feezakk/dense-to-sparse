@@ -9,6 +9,8 @@ defaults:
   eval_dir: ""
   filter: ".*"
 
+  enable_bisim: True
+
   jax:
     platform: gpu
     jit: True
@@ -175,10 +177,11 @@ defaults:
       dist_stoch_imagined: 1.0,
       posterior_kl: 1.0,
       prior_kl: 1.0,
-      bisim_pair: 5.0,   # start in [0.25, 1.0]  
-      bisim_imag_reward_mse: 1.0,
+      bisim_pair: 0.5,   # start in [0.25, 1.0]  
+      bisim_imag_reward_mse: 0.5,
       bisim_imag_next_kl: 0.1,
       bisim_imag_next_deter: 0.1,
+      bisim_calib_reg: 1e-4
 
 
 

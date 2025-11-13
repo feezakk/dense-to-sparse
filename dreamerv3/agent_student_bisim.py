@@ -177,10 +177,23 @@ class Agent(nj.Module):
         # Phase 2: PCB‑only WM update (bisim + distill terms only)
         # ------------------------------------------------------------------
 
-        state2, teacher_state2, outs2, mets2 = self.wm.train(data, teacher_data, state, 
-                                                                teacher_state, traj=traj, teacher_traj=sg(teacher_traj), pcb_only=True)
+        if getattr(self.config, "enable_bisim", True):
+            state2, teacher_state2, outs2, mets2 = self.wm.train(
+                data, teacher_data,
+                state, teacher_state,
+                traj=traj,
+                teacher_traj=sg(teacher_traj),
+                pcb_only=True,
+            )
+            metrics.update({f"pcb_{k}": v for k, v in mets2.items()})
+        else:
+            # Skip bisim: just reuse Phase‑1 WM outputs and states.
+            state2, teacher_state2, outs2 = state, teacher_state, wm_outs
+
+        # state2, teacher_state2, outs2, mets2 = self.wm.train(data, teacher_data, state, 
+        #                                                         teacher_state, traj=traj, teacher_traj=sg(teacher_traj), pcb_only=True)
         
-        metrics.update({f"pcb_{k}": v for k, v in mets2.items()})
+        # metrics.update({f"pcb_{k}": v for k, v in mets2.items()})
 
         return traj, teacher_traj, outs2, state2, teacher_state2, metrics
 
@@ -641,7 +654,8 @@ class WorldModel(nj.Module):
 
                 terms = alpha_r * dR_all + gamma_bisim * trans_all               # [K,T,B]
                 dT = jnp.sum((k_weights[:, None, None] * terms) * mask_all, 0)   # [T,B]
-                mask = cont_shifts[0]                                           # [T,B]
+                # mask = cont_shifts[0]                                           # [T,B]
+                mask = jnp.max(mask_all, axis=0)
 
 
             # EMA normalization + Huber on calibrated φ-gap
@@ -654,6 +668,11 @@ class WorldModel(nj.Module):
 
             err = pred - jax.lax.stop_gradient(dT_norm)
             losses["bisim_pair"] = (huber(err, 1.0) * mask).mean()
+
+            scale_eff = jax.nn.softplus(self.bisim_calib.scale.read()) + 1e-6
+            bias_eff  = jnp.maximum(self.bisim_calib.bias.read(), 0.0)
+            calib_reg = (scale_eff - 1.0) ** 2 + (bias_eff - 0.0) ** 2
+            losses["bisim_calib_reg"] = calib_reg
 
             # Metrics
             wsum = jnp.sum(mask) + 1e-8
@@ -680,7 +699,6 @@ class WorldModel(nj.Module):
             distill["wm/imag_stoch_mse"]  = losses["dist_stoch_imagined"]
         if "dist_deter_imagined" in losses:
             distill["wm/imag_deter_mse"]  = losses["dist_deter_imagined"]
-
         
         scaled = {k: v * self.scales[k] for k, v in losses.items()}
         model_loss = sum(scaled.values())
@@ -694,8 +712,7 @@ class WorldModel(nj.Module):
             metrics["bisim_target_mean"]  = y_mean
             metrics["bisim_target_std"]   = y_std
 
-            scale_eff = jax.nn.softplus(self.bisim_calib.scale.read()) + 1e-6
-            bias_eff  = jnp.maximum(self.bisim_calib.bias.read(), 0.0)
+
             metrics["bisim_scale"] = scale_eff
             metrics["bisim_bias"]  = bias_eff
 
