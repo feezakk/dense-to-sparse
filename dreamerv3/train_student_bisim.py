@@ -54,6 +54,8 @@ def main(argv=None):
     eval_config = embodied.Flags(eval_config).parse(other)
 
     logdir = embodied.Path(config.dreamerv3.logdir)
+
+    # -------------------- student counter + logger --------------------
     step = embodied.Counter()
     logger = embodied.Logger(
         step,
@@ -90,7 +92,9 @@ def main(argv=None):
         actor_dist_disc=dreamerv3_config.actor_dist_disc,
     )
 
-    teacher_agent = dreamerv3.agent_teacher(env.obs_space, env.act_space, step, dreamerv3_config)
+
+    teacher_step = embodied.Counter()  # separate counter for teacher
+    teacher_agent = dreamerv3.agent_teacher(env.obs_space, env.act_space, teacher_step, dreamerv3_config)
     teacher_replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "teacher_replay")
     timer.wrap("agent", teacher_agent, ["policy", "train", "report", "save"])
     timer.wrap("env", env, ["step"])
@@ -99,7 +103,7 @@ def main(argv=None):
 
     expert = embodied.Checkpoint(logdir / "teacher.ckpt")
     timer.wrap("expert", expert, ["save", "load"])
-    expert.step = step
+    expert.step = teacher_step
     expert.agent = teacher_agent
     expert.replay = teacher_replay
     expert.load()  

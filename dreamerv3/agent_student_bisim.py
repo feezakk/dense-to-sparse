@@ -100,30 +100,28 @@ class Agent(nj.Module):
         metrics = {}
         data = self.preprocess(data)
         teacher_data = self.preprocess(teacher_data)
+
+        # ------------------------------------------------------------------
+        # Phase 1: standard WM update from real data only
+        # No traj/teacher_traj passed here => no bisim losses in this phase.
+        # ------------------------------------------------------------------
+
         state, teacher_state, wm_outs, mets = self.wm.train(data, teacher_data, state,teacher_state,traj, teacher_traj)
         metrics.update(mets)
 
-        # 2) For the teacher reward RL
+        # ------------------------------------------------------------------
+        # RL / actor‑critic training, generates traj, teacher_traj
+        # ------------------------------------------------------------------
+
         context = {**data, **teacher_data, **wm_outs["post"]}
-        # start = tree_map(lambda x: x.reshape([-1] + list(x.shape[2:])), context)
         start = tree_map(lambda x: x.reshape([-1]+list(x.shape[2:])), {**data, **wm_outs["post"]})
         start_t = tree_map(lambda x: x.reshape([-1]+list(x.shape[2:])), {**teacher_data, **wm_outs["teacher_post"]})
 
         traj, teacher_traj, mets_expl = self.task_behavior.train(self.wm.imagine, start, start_t, context)
 
-        def _is_distill_key(k: str) -> bool:
-            return (
-                k.startswith("posterior_") or
-                k.startswith("prior_") or
-                k.startswith("dist_") or
-                k in ("kl_mean",  # actor’s teacher-vs-student KL summary
-                    "teacher_wm_l2", "teacher_wm_l2_delta",
-                    "teacher_actor_l2", "teacher_actor_l2_delta")  # if you added fingerprints
-            )
-
         metrics.update(mets_expl)
-
         metrics.update(mets)
+
         if self.config.expl_behavior != "None":
             _, mets = self.expl_behavior.train(self.wm.imagine, start, context)
             metrics.update({"expl_" + key: value for key, value in mets.items()})
@@ -139,18 +137,19 @@ class Agent(nj.Module):
         else:
             outs = {}
 
-        # Don't need the full model_loss_raw or td_error after the priority calculation, summarize it.
         metrics.update({"model_loss_raw": metrics["model_loss_raw"].mean()})
         metrics.update({"td_error": metrics["td_error"].mean()})
 
+        # ------------------------------------------------------------------
+        # Phase 2: PCB‑only WM update (bisim + distill terms only)
+        # ------------------------------------------------------------------
 
-        # Phase 2: PCB-only WM update (imagined reward & next-latent alignment)
-        state2, teacher_state2, wm_outs2, mets2 = self.wm.train(
-            data, teacher_data, state, teacher_state, traj=traj, teacher_traj=sg(teacher_traj))
-        # Optionally: in this phase, zero/low scales for recon/rep; high scales for bisim terms
+        state2, teacher_state2, outs2, mets2 = self.wm.train(data, teacher_data, state, 
+                                                                teacher_state, traj=traj, teacher_traj=sg(teacher_traj), pcb_only=True)
+        
         metrics.update({f"pcb_{k}": v for k, v in mets2.items()})
 
-        return traj, teacher_traj, outs, state, teacher_state, metrics
+        return traj, teacher_traj, outs2, state2, teacher_state2, metrics
 
     def report(self, data,teacher_data):
         self.config.jax.jit and print("Tracing report function.")
@@ -244,9 +243,15 @@ class WorldModel(nj.Module):
         return prev_latent, prev_action
         
 
-    def train(self, data, teacher_data, state,teacher_state,traj=None, teacher_traj=None):
+    def train(self, data, teacher_data, state,teacher_state,traj=None, teacher_traj=None,pcb_only=False):
         modules = [self.encoder, self.rssm, self.phi_head, self.bisim_calib, *self.heads.values()]
-        mets, (state, teacher_state, outs, metrics) = self.opt(modules, self.loss, data, teacher_data, state,teacher_state, traj = traj, teacher_traj = teacher_traj, has_aux=True)
+        mets, (state, teacher_state, outs, metrics) = self.opt(
+            modules, self.loss, 
+            data, teacher_data, state,teacher_state, 
+            traj = traj, 
+            teacher_traj = teacher_traj, 
+            pcb_only=pcb_only,
+            has_aux=True)
         metrics.update(mets)
         self.context = {**data, **outs["post"]}
         self.start = tree_map(lambda x: x.reshape([-1] + list(x.shape[2:])), self.context)
@@ -297,7 +302,7 @@ class WorldModel(nj.Module):
         traj["action"] = actions
         return traj
 
-    def loss(self,traj,teacher_traj, data, teacher_data, state,teacher_state):
+    def loss(self,traj,teacher_traj, data, teacher_data, state,teacher_state,pcb_only=False):
 
         embed = self.encoder(data)
         teacher_embed = self.teacher_wm.encoder(teacher_data)
@@ -388,25 +393,24 @@ class WorldModel(nj.Module):
             if "deter" in s_next and "deter" in t_next:
                 losses["bisim_imag_next_deter"] = jnp.mean((s_next["deter"] - t_next["deter"]) ** 2)
 
-        # distill = {}
-        # if "posterior_stoch_kl" in losses:
-        #     distill["wm/post_kl_stoch"]  = losses["posterior_stoch_kl"]
-        # if "posterior_deter_kl" in losses:
-        #     distill["wm/post_mse_deter"] = losses["posterior_deter_kl"]
-        # if "prior_stoch_kl" in losses:
-        #     distill["wm/prior_kl_stoch"] = losses["prior_stoch_kl"]
-        # if "prior_deter_kl" in losses:
-        #     distill["wm/prior_mse_deter"] = losses["prior_deter_kl"]
-        # if "dist_loss_imagined" in losses:
-        #     distill["wm/imag_logit_kl"]   = losses["dist_loss_imagined"]
-        # if "dist_stoch_imagined" in losses:
-        #     distill["wm/imag_stoch_mse"]  = losses["dist_stoch_imagined"]
-        # if "dist_deter_imagined" in losses:
-        #     distill["wm/imag_deter_mse"]  = losses["dist_deter_imagined"]
+        if pcb_only:
+            def _keep_pcb(name: str) -> bool:
+                # bisim_* terms (pairwise + imagined alignment)
+                if name.startswith("bisim_"):
+                    return True
+                # teacher distillation terms (posterior/prior KLs, imagined distill)
+                if name.startswith("posterior_"):
+                    return True
+                if name.startswith("prior_"):
+                    return True
+                if name.startswith("dist_"):
+                    return True
+                return False
 
-        # scaled = {k: v * self.scales[k] for k, v in losses.items()}
-        # model_loss = sum(scaled.values())
+            losses = {k: v for k, v in losses.items() if _keep_pcb(k)}
 
+        scaled = {k: v * self.scales[k] for k, v in losses.items()}
+        model_loss = sum(scaled.values())
 
         out = {"embed": embed, "post": post, "prior": prior, "teacher_embed": teacher_embed, "teacher_post": teacher_post, "teacher_prior": teacher_prior}
         out.update({f"{k}_loss": v for k, v in losses.items()})
@@ -598,8 +602,7 @@ class WorldModel(nj.Module):
         if "dist_deter_imagined" in losses:
             distill["wm/imag_deter_mse"]  = losses["dist_deter_imagined"]
 
-        scaled = {k: v * self.scales[k] for k, v in losses.items()}
-        model_loss = sum(scaled.values())
+        
 
         metrics = self._metrics(data, dists, post, prior, losses, model_loss)
         metrics["model_loss_raw"] = model_loss  # Store model loss for Curious Replay prioritization
@@ -720,7 +723,7 @@ class WorldModel(nj.Module):
         state = self.initial(len(data["is_first"]))
         teacher_state = self.initial(len(teacher_data["is_first"]))
         report = {}
-        report.update(self.loss(traj=None,teacher_traj=None,data=data,teacher_data=teacher_data, state=state,teacher_state=teacher_state)[-1][-1])
+        report.update(self.loss(traj=None,teacher_traj=None,data=data,teacher_data=teacher_data, state=state,teacher_state=teacher_state, pcb_only=False)[-1][-1])
         context, _ = self.rssm.observe(self.encoder(data)[:6, :5], data["action"][:6, :5], data["is_first"][:6, :5])
         start = {k: v[:, -1] for k, v in context.items()}
         recon = self.heads["decoder"](context)
