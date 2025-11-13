@@ -479,10 +479,10 @@ class WorldModel(nj.Module):
                 if name.startswith("bisim_"):
                     return True
                 # teacher distillation terms (posterior/prior KLs, imagined distill)
-                if name.startswith("posterior_"):
-                    return True
-                if name.startswith("prior_"):
-                    return True
+                # if name.startswith("posterior_"):
+                #     return True
+                # if name.startswith("prior_"):
+                #     return True
                 if name.startswith("dist_"):
                     return True
                 return False
