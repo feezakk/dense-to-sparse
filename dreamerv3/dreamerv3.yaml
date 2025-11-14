@@ -31,7 +31,7 @@ defaults:
     save_every: 10000
     eval_every: 10000
     eval_initial: True
-    eval_eps: 1
+    eval_eps: 10
     eval_samples: 1
     train_ratio: 512
     train_fill: 0

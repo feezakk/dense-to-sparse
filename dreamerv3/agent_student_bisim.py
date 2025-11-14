@@ -407,6 +407,16 @@ class WorldModel(nj.Module):
             # 3) calibration head
             dummy_gap = jnp.zeros(post["deter"].shape[:2], dtype=jnp.float32)  # [T, B]
             _ = self.bisim_calib(dummy_gap)
+
+
+            # NEW: force creation of teacher reward and cont heads
+            teacher_dummy = {
+                "deter": teacher_post["deter"],
+                "stoch": teacher_post["stoch"],
+                "logit": teacher_post["logit"],
+            }
+            _ = self.teacher_wm.heads["reward"](teacher_dummy).mean()
+            _ = self.teacher_wm.heads["cont"](teacher_dummy).mean()
         # -------------------------------------------------------------------------
 
         dists = {}

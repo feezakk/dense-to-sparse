@@ -123,7 +123,6 @@ def main(argv=None):
 
     agent = dreamerv3.agent_student_bisim(env.obs_space, env.act_space, teacher_wm, tp,  step, dreamerv3_config)  
 
-    # ---------- NEW BLOCK ----------
     import jax
     import jax.numpy as jnp
     import numpy as np
@@ -131,20 +130,55 @@ def main(argv=None):
     teacher_vars = teacher_agent.save()
     student_vars = agent.save()
 
-    # Map teacher world model weights "agent/wm/*" -> student's frozen "agent/teacher_wm/*"
     copied = 0
+    missing = 0
+    shape_mismatch = 0
+
     for k, v in teacher_vars.items():
-        if k.startswith("agent/wm/"):
-            # Teacher: agent/wm/enc/..., agent/wm/rssm/..., etc.
-            # Student frozen teacher: agent/teacher_wm/enc/..., agent/teacher_wm/rssm/..., etc.
-            k_student = k.replace("agent/wm/", "agent/teacher_wm/")
-            if k_student in student_vars and isinstance(v, (np.ndarray, jnp.ndarray)):
-                student_vars[k_student] = v
-                copied += 1
+        if not k.startswith("agent/wm/"):
+            continue
+        k_student = k.replace("agent/wm/", "agent/teacher_wm/")
 
-    print(f"[WM copy] Copied {copied} tensors from teacher.wm -> student.teacher_wm.")
+        if k_student not in student_vars:
+            print("[MISSING IN STUDENT]", k_student)
+            missing += 1
+            continue
 
+        if student_vars[k_student].shape != v.shape:
+            print("[SHAPE MISMATCH]", k_student,
+                "student", student_vars[k_student].shape,
+                "teacher", v.shape)
+            shape_mismatch += 1
+            continue
+
+        student_vars[k_student] = v
+        copied += 1
+
+    print(f"[WM copy] Copied {copied} tensors, missing={missing}, shape_mismatch={shape_mismatch}")
     agent.load(student_vars)
+
+    # # ---------- NEW BLOCK ----------
+    # import jax
+    # import jax.numpy as jnp
+    # import numpy as np
+
+    # teacher_vars = teacher_agent.save()
+    # student_vars = agent.save()
+
+    # # Map teacher world model weights "agent/wm/*" -> student's frozen "agent/teacher_wm/*"
+    # copied = 0
+    # for k, v in teacher_vars.items():
+    #     if k.startswith("agent/wm/"):
+    #         # Teacher: agent/wm/enc/..., agent/wm/rssm/..., etc.
+    #         # Student frozen teacher: agent/teacher_wm/enc/..., agent/teacher_wm/rssm/..., etc.
+    #         k_student = k.replace("agent/wm/", "agent/teacher_wm/")
+    #         if k_student in student_vars and isinstance(v, (np.ndarray, jnp.ndarray)):
+    #             student_vars[k_student] = v
+    #             copied += 1
+
+    # print(f"[WM copy] Copied {copied} tensors from teacher.wm -> student.teacher_wm.")
+
+    # agent.load(student_vars)
 
     # # Correct prefix (no leading slash!)
     # # TEACHER_WM_PREFIX = "agent/wm/"
@@ -221,6 +255,22 @@ def main(argv=None):
 
     param_norm(teacher_agent, "Teacher")
     param_norm(agent, "Student (after copy)")
+
+    def wm_subtree_norm(vars_dict, prefix):
+        arrs = [v for k, v in vars_dict.items()
+                if k.startswith(prefix) and isinstance(v, (np.ndarray, jnp.ndarray))]
+        if not arrs:
+            print(f"[{prefix}] No params found")
+            return
+        flat = np.concatenate([np.ravel(v) for v in arrs])
+        print(f"[{prefix}] L2 norm = {np.linalg.norm(flat):.6e}")
+
+    teacher_vars  = teacher_agent.save()
+    student_vars  = agent.save()
+
+    wm_subtree_norm(teacher_vars, "agent/wm/")
+    wm_subtree_norm(student_vars, "agent/teacher_wm/")
+
 
 
     replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "teacher_replay")
