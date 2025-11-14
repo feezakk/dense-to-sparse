@@ -23,9 +23,9 @@ def Wrapper(agent_cls):
 
 
 class JAXAgent(embodied.Agent):
-    def __init__(self, agent_cls, obs_space, act_space, teacher_wm, teacher_policy, step, config):
+    def __init__(self, agent_cls, obs_space, act_space, teacher_wm, teacher_policy, step, config, teacher_state=None):
         self.config = config.jax
-        # self.teacher_state = teacher_state
+        self.teacher_state = teacher_state
         self.batch_size = config.batch_size
         self.batch_length = config.batch_length
         self.data_loaders = config.data_loaders
@@ -223,85 +223,114 @@ class JAXAgent(embodied.Agent):
             return jax.device_put_replicated(self.rng.integers(high), devices)
         else:
             return jax.device_put_sharded(list(self.rng.integers(high, size=len(devices))), devices)
-
+        
+    
     def _init_varibs(self, obs_space, act_space):
         varibs = {}
         rng = self._next_rngs(self.train_devices, mirror=True)
         dims = (self.batch_size, self.batch_length)
-        # print("act_space:", act_space)
-        teacher_act_space = dict()
-        teacher_act_space["teacher_action"] = act_space["action"]
-        # print("teacher_act_space:", teacher_act_space)
-        data = self._dummy_batch({**obs_space, **act_space, **teacher_act_space}, dims)
-        teacher_data = self._dummy_batch({**obs_space, **act_space, **teacher_act_space}, dims)
-        # print("data:", jax.device_get(data.keys())) 
+
+        # Use the same obs+act structure for both student and teacher dummy batches
+        joint_space = {**obs_space, **act_space}
+
+        data = self._dummy_batch(joint_space, dims)
+        teacher_data = self._dummy_batch(joint_space, dims)
+
         data = self._convert_inps(data, self.train_devices)
         teacher_data = self._convert_inps(teacher_data, self.train_devices)
+
         state, varibs = self._init_train(varibs, rng, data["is_first"])
-        teacher_state = None
-        # print("data:", jax.device_get(data.keys())) 
-        varibs = self._train(varibs, rng, data, teacher_data,state,teacher_state,init_only=True)
-        # obs = self._dummy_batch(obs_space, (1,))
-        # state, varibs = self._init_policy(varibs, rng, obs['is_first'])
-        # varibs = self._policy(
-        #     varibs, rng, obs, state, mode='train', init_only=True)
-        # 2. If we have a teacher_state, overwrite the internal teacher WM subtree
+        teacher_state, _ = self._init_train(varibs, rng, teacher_data["is_first"])
 
-        # if self.teacher_state is not None:
-        #     # One-time debugging: inspect some keys to see how teacher WM appears
-        #     teacher_flat = self.teacher_state
-        #     print("Sample teacher_state keys with 'wm' in them:")
-        #     for k in teacher_flat.keys():
-        #         if "/wm/" in k:
-        #             print("  ", k)
-        #             break
-
-        #     if len(self.train_devices) > 1:
-        #         varibs_host = tree_map(lambda x: x[0], varibs)
-        #     else:
-        #         varibs_host = varibs
-
-        #     print("Sample student varibs keys possibly for teacher WM:")
-        #     for k in varibs_host.keys():
-        #         if "teacher_wm" in k or "/wm_teacher" in k or "/wm/" in k:
-        #             print("  ", k)
-        #             break
-
-
-
-        # if self.teacher_state is not None:
-        #     # teacher_state is a host-side tree returned by teacher_agent.save()
-        #     teacher_flat = self.teacher_state
-
-        #     # Get a plain Python dict from varibs (might be sharded if multi-device)
-        #     if len(self.train_devices) > 1:
-        #         varibs_host = tree_map(lambda x: x[0], varibs)
-        #     else:
-        #         varibs_host = varibs
-
-        #     # Convert to a mutable dict (if Checkpoint uses a flat dict, you may have that already)
-        #     varibs_host = dict(varibs_host)
-
-        #     # ----- KEY MAPPING -----
-        #     # We now need to copy just the teacher WM parameters from teacher_flat
-        #     # into the student's *teacher* WM location.
-        #     #
-        #     # This is the only place where we have to be slightly careful about key prefixes.
-        #     teacher_prefix = "/agent/wm/"          # in teacher_state
-        #     student_teacher_prefix = "/agent/teacher_wm/"  # adjust after inspecting keys
-
-        #     for k, v in teacher_flat.items():
-        #         if k.startswith(teacher_prefix):
-        #             k_student = k.replace(teacher_prefix, student_teacher_prefix)
-        #             if k_student in varibs_host:
-        #                 varibs_host[k_student] = v
-
-        #     # Put the patched varibs back on device(s)
-        #     if len(self.train_devices) > 1:
-        #         varibs = jax.device_put_replicated(varibs_host, self.train_devices)
-        #     else:
-        #         varibs = varibs_host
+        varibs = self._train(
+            varibs, rng,
+            data, teacher_data,
+            state, teacher_state,
+            init_only=True,
+        )
         return varibs
+
+
+
+
+    # def _init_varibs(self, obs_space, act_space):
+    #     varibs = {}
+    #     rng = self._next_rngs(self.train_devices, mirror=True)
+    #     dims = (self.batch_size, self.batch_length)
+    #     # print("act_space:", act_space)
+    #     teacher_act_space = dict()
+    #     teacher_act_space["teacher_action"] = act_space["action"]
+    #     # print("teacher_act_space:", teacher_act_space)
+    #     data = self._dummy_batch({**obs_space, **act_space, **teacher_act_space}, dims)
+    #     teacher_data = self._dummy_batch({**obs_space, **act_space, **teacher_act_space}, dims)
+    #     # print("data:", jax.device_get(data.keys())) 
+    #     data = self._convert_inps(data, self.train_devices)
+    #     teacher_data = self._convert_inps(teacher_data, self.train_devices)
+    #     state, varibs = self._init_train(varibs, rng, data["is_first"])
+    #     teacher_state, _= self._init_train(varibs, rng, teacher_data["is_first"])
+    #     # print("data:", jax.device_get(data.keys())) 
+    #     varibs = self._train(varibs, rng, data, teacher_data,state,teacher_state,init_only=True)
+    #     # obs = self._dummy_batch(obs_space, (1,))
+    #     # state, varibs = self._init_policy(varibs, rng, obs['is_first'])
+    #     # varibs = self._policy(
+    #     #     varibs, rng, obs, state, mode='train', init_only=True)
+    #     # 2. If we have a teacher_state, overwrite the internal teacher WM subtree
+
+    #     # if self.teacher_state is not None:
+    #     #     # One-time debugging: inspect some keys to see how teacher WM appears
+    #     #     teacher_flat = self.teacher_state
+    #     #     print("Sample teacher_state keys with 'wm' in them:")
+    #     #     for k in teacher_flat.keys():
+    #     #         if "/wm/" in k:
+    #     #             print("  ", k)
+    #     #             break
+
+    #     #     if len(self.train_devices) > 1:
+    #     #         varibs_host = tree_map(lambda x: x[0], varibs)
+    #     #     else:
+    #     #         varibs_host = varibs
+
+    #     #     print("Sample student varibs keys possibly for teacher WM:")
+    #     #     for k in varibs_host.keys():
+    #     #         if "teacher_wm" in k or "/wm_teacher" in k or "/wm/" in k:
+    #     #             print("  ", k)
+    #     #             break
+
+
+
+    #     # if self.teacher_state is not None:
+    #     #     # teacher_state is a host-side tree returned by teacher_agent.save()
+    #     #     teacher_flat = self.teacher_state
+
+    #     #     # Get a plain Python dict from varibs (might be sharded if multi-device)
+    #     #     if len(self.train_devices) > 1:
+    #     #         varibs_host = tree_map(lambda x: x[0], varibs)
+    #     #     else:
+    #     #         varibs_host = varibs
+
+    #     #     # Convert to a mutable dict (if Checkpoint uses a flat dict, you may have that already)
+    #     #     varibs_host = dict(varibs_host)
+
+    #     #     # ----- KEY MAPPING -----
+    #     #     # We now need to copy just the teacher WM parameters from teacher_flat
+    #     #     # into the student's *teacher* WM location.
+    #     #     #
+    #     #     # This is the only place where we have to be slightly careful about key prefixes.
+    #     #     teacher_prefix = "/agent/wm/"          # in teacher_state
+    #     #     student_teacher_prefix = "/agent/teacher_wm/"  # adjust after inspecting keys
+
+    #     #     for k, v in teacher_flat.items():
+    #     #         if k.startswith(teacher_prefix):
+    #     #             k_student = k.replace(teacher_prefix, student_teacher_prefix)
+    #     #             if k_student in varibs_host:
+    #     #                 varibs_host[k_student] = v
+
+    #     #     # Put the patched varibs back on device(s)
+    #     #     if len(self.train_devices) > 1:
+    #     #         varibs = jax.device_put_replicated(varibs_host, self.train_devices)
+    #     #     else:
+    #     #         varibs = varibs_host
+    #     return varibs
 
     def _dummy_batch(self, spaces, batch_dims):
         spaces = list(spaces.items())

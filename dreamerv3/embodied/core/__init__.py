@@ -13,6 +13,7 @@ from .counter import Counter
 from .distr import BatchServer, Client, Server
 from .driver_student import DriverStudent
 from .driver_teacher import DriverTeacher
+from .driver_student_bisim import DriverStudentBisim
 from .flags import Flags
 from .logger import Logger
 from .metrics import Metrics

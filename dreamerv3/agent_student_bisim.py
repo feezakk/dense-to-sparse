@@ -385,7 +385,7 @@ class WorldModel(nj.Module):
         embed = self.encoder(data)
         teacher_embed = self.teacher_wm.encoder(teacher_data)
         prev_latent, prev_action = state
-        teacher_prev_latent, teacher_prev_action = state
+        teacher_prev_latent, teacher_prev_action = teacher_state
 
         prev_actions = jnp.concatenate([prev_action[:, None], data["action"][:, :-1]], 1)     
         teacher_prev_actions = jnp.concatenate([teacher_prev_action[:, None], teacher_data["action"][:, :-1]], 1)

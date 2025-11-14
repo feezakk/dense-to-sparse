@@ -99,6 +99,8 @@ def main(argv=None):
     teacher_step = embodied.Counter()  # separate counter for teacher
     teacher_agent = dreamerv3.agent_teacher(env.obs_space, env.act_space, teacher_step, dreamerv3_config)
     teacher_replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "teacher_replay")
+
+    # teacher_replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "replay")
     timer.wrap("agent", teacher_agent, ["policy", "train", "report", "save"])
     timer.wrap("env", env, ["step"])
     timer.wrap("replay", teacher_replay, ["add", "save"])
@@ -221,10 +223,10 @@ def main(argv=None):
     param_norm(agent, "Student (after copy)")
 
 
-    replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "replay")
+    replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "teacher_replay")
     eval_replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "eval_replay")  
     
-    embodied.run.train_student(agent, teacher_policy, env, eval_env, replay, eval_replay, teacher_replay, logger, args)
+    embodied.run.train_student_bisim(agent, teacher_policy, env, eval_env, replay, eval_replay, teacher_replay, logger, args)
 
 
 if __name__ == "__main__":

@@ -324,8 +324,8 @@ class CarlaLaneFollowingStudentEnv(gym.Env):
             "image": self.camera_image,
             "collision": 1 if self.collision_detected else 0,
             "lane_invasion": 1 if self.lane_invasion_detected else 0,
-            "achieved_goal": ag,
-            "desired_goal": dg,
+            # "achieved_goal": ag,
+            # "desired_goal": dg,
 
         }
 

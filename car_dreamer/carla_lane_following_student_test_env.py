@@ -362,8 +362,8 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
             "image": self.camera_image,
             "collision": 1 if self.collision_detected else 0,
             "lane_invasion": 1 if self.lane_invasion_detected else 0,
-            "achieved_goal": ag,
-            "desired_goal": dg,
+            # "achieved_goal": ag,
+            # "desired_goal": dg,
 
         }
 
@@ -677,8 +677,8 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
             "image": camera_space,
             "collision": collision_space,
             "lane_invasion": lane_invasion_space,
-            "achieved_goal": goal_space, 
-            "desired_goal": goal_space,
+            # "achieved_goal": goal_space, 
+            # "desired_goal": goal_space,
         })
 
     # --------------------------------------------------------------------------
