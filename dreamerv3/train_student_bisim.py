@@ -7,6 +7,10 @@ import ruamel.yaml as yaml
 import car_dreamer
 import dreamerv3
 
+import jax
+import jax.numpy as jnp
+import numpy as np
+
 warnings.filterwarnings("ignore", ".*truncated to dtype int32.*")
 
 from jax import config
@@ -73,6 +77,8 @@ def main(argv=None):
 
     dreamerv3_config = config.dreamerv3
 
+    shared_replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "teacher_replay")
+
     env = from_gym.FromGym(env)
     env = wrap_env(env, dreamerv3_config)
     env = embodied.BatchEnv([env], parallel=False)
@@ -98,7 +104,7 @@ def main(argv=None):
 
     teacher_step = embodied.Counter()  # separate counter for teacher
     teacher_agent = dreamerv3.agent_teacher(env.obs_space, env.act_space, teacher_step, dreamerv3_config)
-    teacher_replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "teacher_replay")
+    teacher_replay = shared_replay
 
     # teacher_replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "replay")
     timer.wrap("agent", teacher_agent, ["policy", "train", "report", "save"])
@@ -117,9 +123,6 @@ def main(argv=None):
 
     tp = teacher_agent.agent.task_behavior.ac.policy
     teacher_wm = teacher_agent.agent.wm
-
-
-    # teacher_state = teacher_agent.save()
 
     agent = dreamerv3.agent_student_bisim(env.obs_space, env.act_space, teacher_wm, tp,  step, dreamerv3_config)  
 
@@ -157,85 +160,13 @@ def main(argv=None):
     print(f"[WM copy] Copied {copied} tensors, missing={missing}, shape_mismatch={shape_mismatch}")
     agent.load(student_vars)
 
-    # # ---------- NEW BLOCK ----------
-    # import jax
-    # import jax.numpy as jnp
-    # import numpy as np
-
-    # teacher_vars = teacher_agent.save()
-    # student_vars = agent.save()
-
-    # # Map teacher world model weights "agent/wm/*" -> student's frozen "agent/teacher_wm/*"
-    # copied = 0
-    # for k, v in teacher_vars.items():
-    #     if k.startswith("agent/wm/"):
-    #         # Teacher: agent/wm/enc/..., agent/wm/rssm/..., etc.
-    #         # Student frozen teacher: agent/teacher_wm/enc/..., agent/teacher_wm/rssm/..., etc.
-    #         k_student = k.replace("agent/wm/", "agent/teacher_wm/")
-    #         if k_student in student_vars and isinstance(v, (np.ndarray, jnp.ndarray)):
-    #             student_vars[k_student] = v
-    #             copied += 1
-
-    # print(f"[WM copy] Copied {copied} tensors from teacher.wm -> student.teacher_wm.")
-
-    # agent.load(student_vars)
-
-    # # Correct prefix (no leading slash!)
-    # # TEACHER_WM_PREFIX = "agent/wm/"
-    # WM_WEIGHT_PREFIXES = [
-    #     "agent/wm/enc/",
-    #     "agent/wm/rssm/",
-    #     "agent/wm/dec/",
-    #     "agent/wm/rew/",
-    #     "agent/wm/cont/",
-    # ]
-
-    # def _is_wm_weight_key(k: str) -> bool:
-    #     return any(k.startswith(p) for p in WM_WEIGHT_PREFIXES)
-
-    # import numpy as np
-    # import jax.numpy as jnp
-
-    # copied = 0
-    # for k, v in teacher_vars.items():
-    #     if _is_wm_weight_key(k) and isinstance(v, (np.ndarray, jnp.ndarray)):
-    #         student_vars[k] = v
-    #         copied += 1
-
     print("***************************************************************")
     print(f"[WM copy] Copied {copied} teacher WM tensors into student WM.")
     print("***************************************************************")
-    # agent.load(student_vars)
-
-    # ---------- END NEW BLOCK ----------
-
-    # Optional sanity check: compare L2 norms of WM parameters
-    import jax
-    import jax.numpy as jnp
-    import numpy as np
-
-    # def param_norm(agent_obj, label):
-    #     vars_dict = agent_obj.save()
-
-    #     # Only take arrays belonging to the world model.
-    #     wm_arrays = [
-    #         v
-    #         for k, v in vars_dict.items()
-    #         if k.startswith("agent/wm/") and isinstance(v, (np.ndarray, jnp.ndarray))
-    #     ]
-
-    #     if not wm_arrays:
-    #         print(f"[{label}] No agent/wm/ parameter arrays found.")
-    #         return
-
-    #     flat = jnp.concatenate([jnp.ravel(jnp.asarray(v)) for v in wm_arrays])
-    #     norm = jnp.sqrt(jnp.sum(flat ** 2))
-    #     print(f"[{label}] ||agent/wm||_2 = {float(norm):.6e}")
-
+    
     def param_norm(agent_obj, label):
         vars_dict = agent_obj.save()
 
-        # Only take arrays belonging to the world model.
         wm_arrays = [
             v
             for k, v in vars_dict.items()
@@ -271,9 +202,7 @@ def main(argv=None):
     wm_subtree_norm(teacher_vars, "agent/wm/")
     wm_subtree_norm(student_vars, "agent/teacher_wm/")
 
-
-
-    replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "teacher_replay")
+    replay = shared_replay
     eval_replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "eval_replay")  
     
     embodied.run.train_student_bisim(agent, teacher_policy, env, eval_env, replay, eval_replay, teacher_replay, logger, args)
