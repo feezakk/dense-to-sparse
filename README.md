@@ -2,7 +2,7 @@
 
 ## Training Teacher on Dense Reward on CARLA Overtaking and Lane Following Tasks 
 
-1. ### Train Teacher Model - Overtaking
+### 1. Train Teacher Model - Overtaking
 
    Train the DreamerV3 teacher model for the overtaking task:
 
@@ -12,7 +12,7 @@
      --dreamerv3.logdir ./logdir/carla_overtaking_teacher/
    ```
 
-2. ### Train Teacher Model - Lane Following
+### 2. Train Teacher Model - Lane Following
 
    Train the DreamerV3 teacher model for the lane following task:
 
@@ -24,7 +24,7 @@
 
 ## Distillation on CARLA Overtaking and Lane Following Tasks 
 
-1. ### Train Student Model - Lane Following with distillation
+### 1. Train Student Model - Lane Following with distillation
 
    Run the DreamerV3 student without bisimulation:
 
@@ -33,8 +33,9 @@
      --task carla_lane_following_student \
      --dreamerv3.logdir ./logdir/carla_lane_following_student/ \
      --dreamerv3.enable_bisim=False
+   ```
 
-2. ### Train Student Model - Overtaking with distillation
+### 2. Train Student Model - Overtaking with distillation
 
    Run the DreamerV3 student without bisimulation:
 
@@ -43,8 +44,9 @@
      --task carla_lane_overtake_student \
      --dreamerv3.logdir ./logdir/carla_lane_overtaking_student/ \
      --dreamerv3.enable_bisim=False
+   ```
 
-3. ### Run without bisim with loss scaling - Lane Following
+### 3. Run without bisim with loss scaling - Lane Following
 
    Run the DreamerV3 student without bisimulation but with loss scaling:
 
@@ -61,7 +63,7 @@
 
 ## Train Student on Sparse Rewards on CARLA Overtaking and Lane Following Tasks 
 
-1. ### Train  Student Model on Sparse Rewards - Overtaking
+### 1. Train  Student Model on Sparse Rewards - Overtaking
 
    Train the DreamerV3 teacher model for the overtaking task:
 
@@ -71,7 +73,7 @@
      --dreamerv3.logdir ./logdir/carla_overtaking_teacher/
    ```
 
-2. ### Train  Student Model on Sparse Rewards - Lane Following
+### 2. Train  Student Model on Sparse Rewards - Lane Following
 
    Train the DreamerV3 teacher model for the lane following task:
 
