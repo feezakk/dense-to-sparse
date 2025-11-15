@@ -180,9 +180,6 @@ defaults:
       bisim_imag_next_kl: 0.1,
       bisim_imag_next_deter: 0.1,
       bisim_calib_reg: 1e-4
-
-
-
     }
 
   # --- bisimulation target (teacher) ---

@@ -32,10 +32,15 @@ NON_EGO_SPAWN_POINT = [[-16.712175369262695, -165.74740600585938, 0.281942427158
                    [-6.2216644287109375, -168.18861389160156, 0.2819424271583557, 0.0, 89.7751235961914, 0.0]]
 
 
-EGO_END_POINT =    [[-16.520898818969727, -117.01853942871094, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
-                   [-13.030336380004883, -119.4322738647461, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
-                   [-9.520939826965332, -117.04601287841797, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
-                   [-6.030386447906494, -119.45975494384766, 0.2819424271583557, 0.0, 89.77516174316406, 0.0]]
+# EGO_END_POINT =    [[-16.520898818969727, -117.01853942871094, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
+#                    [-13.030336380004883, -119.4322738647461, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
+#                    [-9.520939826965332, -117.04601287841797, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
+#                    [-6.030386447906494, -119.45975494384766, 0.2819424271583557, 0.0, 89.77516174316406, 0.0]]
+
+EGO_END_POINT =    [[-16.520898818969727, -155.01853942871094, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
+                   [-13.030336380004883, -155.4322738647461, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
+                   [-9.520939826965332, -155.04601287841797, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
+                   [-6.030386447906494, -155.45975494384766, 0.2819424271583557, 0.0, 89.77516174316406, 0.0]]
 
 
 DISCRETE_ACC = [0.0, 0.3] # discrete value of accelerations
@@ -76,8 +81,6 @@ TERMINAL = {
       'lane_width': 3.4,
       'terminal_dist': 100, # terminate tasks
 }
-
-
 # --------------------------------------------------------------------------------
 # A helper function to compute 2D distances
 # --------------------------------------------------------------------------------
@@ -178,8 +181,12 @@ class CarlaOvertakeEnv(gym.Env):
         # Setup blueprint library
         self.blueprint_library = self.world.get_blueprint_library()
 
+        # self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+
         self._spawn_queue = deque(np.random.permutation(len(EGO_SPAWN_POINT)))
         self.spawn_index = self._spawn_queue.popleft()
+
+
 
         self.ego_transform = carla.Transform(
             carla.Location(x = EGO_SPAWN_POINT[self.spawn_index][0], y = EGO_SPAWN_POINT[self.spawn_index][1], z = EGO_SPAWN_POINT[self.spawn_index][2]),
@@ -202,7 +209,7 @@ class CarlaOvertakeEnv(gym.Env):
         self.timestep = 0
 
         self.episode_buffer = []
-        self.all_episodes_data = []  
+        self.all_episodes_data = []  # optional: store all episodes in memory if you want
 
         self.initial_distance_to_goal = 270
         self.previous_lane_invasions = 0
@@ -340,7 +347,7 @@ class CarlaOvertakeEnv(gym.Env):
 
             print("Non-Ego Vehicle Set")
 
-        self.nonego_spawn_point = [nonego_transform.location.x, nonego_transform.location.y, nonego_transform.location.z]    
+        self.nonego_spawn_point = [nonego_transform.location.x, nonego_transform.location.y, nonego_transform.location.z]     
 
     # --------------------------------------------------------------------------
     # Observations
@@ -377,14 +384,46 @@ class CarlaOvertakeEnv(gym.Env):
             "image": self.camera_image,
             "collision": 1 if self.collision_detected else 0,
             "lane_invasion": 1 if self.lane_invasion_detected else 0,
-            "achieved_goal": ag,
-            "desired_goal": dg,
+            # "achieved_goal": ag,
+            # "desired_goal": dg,
 
         }
 
     # --------------------------------------------------------------------------
     # Gym methods: reset, step, (optional) render, close
     # --------------------------------------------------------------------------
+
+        # --------------------------------------------------------------------------
+    # Gym methods: reset, step, (optional) render, close
+    # --------------------------------------------------------------------------
+
+    def _safe_destroy(self,actor):
+        # CARLA actors become invalid immediately after destroy().
+        # This guard ensures we don't crash if the actor is already dead or invalid.
+        if actor is None:
+            return
+        try:
+            # `.is_alive` is cheap; only destroy when true.
+            if getattr(actor, "is_alive", False):
+                actor.destroy()
+        except RuntimeError:
+            # "trying to operate on a destroyed actor" → ignore and proceed
+            pass
+
+    def _destroy_batch(self, world, actors):
+        # Prefer batched destruction to avoid racey per-actor calls.
+        actors = [a for a in actors if a is not None and getattr(a, "is_alive", False)]
+        if not actors:
+            return
+        try:
+            cmds = [carla.command.DestroyActor(a) for a in actors]
+            world.apply_batch_sync(cmds, True)
+        except Exception:
+            # Fall back to per-actor best-effort
+            for a in actors:
+                self._safe_destroy(a)
+
+
     def reset(self):
         self._hard_world_cleanup()
         self._clean_actors()
@@ -428,6 +467,11 @@ class CarlaOvertakeEnv(gym.Env):
         self.collision_detected = False
         self.collision_hist = []
 
+        self._destroy_batch(self.world, [self.nonego] + getattr(self, "other_vehicles", []))
+        self.nonego = None
+        self.other_vehicles = []
+        self.world.tick()  # ensure destruction applies before respawn
+
         self.world.tick()
 
         self.reset_vehicle()
@@ -438,9 +482,12 @@ class CarlaOvertakeEnv(gym.Env):
         if self.nonego is not None:
             self.actors.append(self.nonego)
 
+        # Keep track of actors to destroy later
+        # self.actors = [self.nonego, self.ego]
+
         # Initialize the vehicle with default controls
         self.ego.apply_control(carla.VehicleControl(manual_gear_shift=False, reverse=False, hand_brake=False,steer=0.0, throttle=0.0, brake=0.0))
-        time.sleep(1)
+        time.sleep(1)  # Allow time for sensors to initialize
 
         self.episode_start = time.time()
 
@@ -518,6 +565,35 @@ class CarlaOvertakeEnv(gym.Env):
         nonego control, ticks the world, calculates reward, checks terminal.
         """
 
+        # obs_current = self._get_observation()
+
+        # if self.save_every_n and (self.timestep % self.save_every_n == 0):
+        #     np.save(str(img_path.with_suffix('.npy')), obs_current["image"])
+        #     oc = str(img_path)
+        # else:
+        #     oc = None  # or keep a placeholder
+
+        # curr_path = "data/" + str(self.episode_id) + "/curr"
+        # curr_path = Path(curr_path)
+        # next_path = "data/" + str(self.episode_id) + "/next"
+        # next_path = Path(next_path)
+
+        # curr_path.mkdir(parents=True, exist_ok=True)
+        # next_path.mkdir(parents=True, exist_ok=True)
+
+        # # 2. Save the image to disk if it exists
+        # if obs_current["image"] is not None: 
+        #     # Create a filename like episode_0_step_0.jpg
+        #     img_name = f"episode_{self.episode_id}_step_{self.timestep}"
+        #     img_path = curr_path / img_name
+            
+        #     # obs["image"] is a numpy array in BGR or RGB
+        #     # cv2.imwrite(str(img_path), obs_current["image"]) 
+        #     np.save(str(img_path.with_suffix('.npy')), obs_current["image"]) 
+            
+        #     # Replace the image in your transition with the *filename* only
+        #     oc = str(img_path)
+        obs = self._get_observation()
         # 1. Apply Ego action
         self.apply_control(action)
 
@@ -526,14 +602,17 @@ class CarlaOvertakeEnv(gym.Env):
 
         # 3. Tick the world
         self.world.tick()
-
         if self.nonego is not None and self.nonego.is_alive:
             pass
         else:
             if self.nonego is not None:
-                self.nonego.destroy()
-            if self.nonego.is_alive:
-                self.nonego.destroy()
+                self._safe_destroy(self.nonego)
+                self.nonego = None
+                # self.nonego.destroy()
+            # if self.nonego.is_alive:
+            #     self.nonego.destroy()
+            self._destroy_batch(self.world, getattr(self, "other_vehicles", []))
+            self.other_vehicles = []
             self.reset_other_vehicles()
         
         # 4. Update waypoint
@@ -546,7 +625,16 @@ class CarlaOvertakeEnv(gym.Env):
         self.speed_kmh = 3.6 * math.sqrt(self.velocity.x**2 + self.velocity.y**2 + self.velocity.z**2)
 
         # 5. Compute observation
-        obs = self._get_observation()
+        
+
+        # 6) Save the *next* obs image to disk
+        # if obs["image"] is not None:
+        #     img_name = f"episode_{self.episode_id}_step_{self.timestep}_next"
+        #     # img_path = next_path / img_name
+            
+        #     # cv2.imwrite(str(img_path), obs["image"]) 
+        #     np.save(str(img_path.with_suffix('.npy')), obs["image"])
+        #     on = str(img_path)
 
         # 7. Compute reward
         reward, info_dict = self._compute_reward()
@@ -559,6 +647,7 @@ class CarlaOvertakeEnv(gym.Env):
 
         info_dict["off_center_m"] = abs(self.get_signed_lane_offset())
 
+
         # 4. Check termination
         done, terminal_info = self._check_termination()
 
@@ -568,7 +657,25 @@ class CarlaOvertakeEnv(gym.Env):
 
         info = {**info_dict, **terminal_info}
 
+        # store the transition in the buffer
+        # transition = {
+        #     "observation": oc,
+        #     "action": action,
+        #     "reward": reward,
+        #     "done": done,
+        #     "next_observation": on,
+        #     "info": info
+        # }
+
+        # self.episode_buffer.append(transition)
+
+        # if episode ended, optionally store or process
         if done:
+            # Example 1: keep it in `all_episodes_data`
+            # self.all_episodes_data.append(self.episode_buffer)
+
+            # Example 2: or write it to disk
+            # self._save_episode_to_disk(self.episode_buffer)
             self.episode_id += 1
 
         # 7. show the image
@@ -605,6 +712,10 @@ class CarlaOvertakeEnv(gym.Env):
         settings.fixed_delta_seconds = None
         self.world.apply_settings(settings)
         self._sync_enabled = False
+
+        self._destroy_batch(self.world, [self.nonego] + getattr(self, "other_vehicles", []))
+        self.nonego = None
+        self.other_vehicles = []
 
         self._clean_actors()
         pass
@@ -650,8 +761,8 @@ class CarlaOvertakeEnv(gym.Env):
             "image": camera_space,
             "collision": collision_space,
             "lane_invasion": lane_invasion_space,
-            "achieved_goal": goal_space, 
-            "desired_goal": goal_space,
+            # "achieved_goal": goal_space, 
+            # "desired_goal": goal_space,
         })
 
     # --------------------------------------------------------------------------
@@ -667,7 +778,7 @@ class CarlaOvertakeEnv(gym.Env):
         self.camera.set_attribute("sensor_tick", "0.1")  # = fixed_delta_seconds
 
         # camera_spawn = carla.Transform(carla.Location(x=1.5, z=1.8), carla.Rotation(pitch=0)) 
-        camera_spawn = carla.Transform(carla.Location(z=10), carla.Rotation(pitch=-90)) 
+        camera_spawn = carla.Transform(carla.Location(z=20), carla.Rotation(pitch=-90)) 
         self.camera_sensor = self.world.spawn_actor(self.camera, camera_spawn, attach_to=self.ego)
         self.actors.append(self.camera_sensor)
 
@@ -746,7 +857,9 @@ class CarlaOvertakeEnv(gym.Env):
     # --------------------------------------------------------------------------
     def apply_control(self, action) -> None:
         control = self._get_vehicle_control(action)
+        nonego_control = self._get_nonego_vehicle_control()
         self.ego.apply_control(control)
+        self.nonego.apply_control(nonego_control)
 
     # --------------------------------------------------------------------------
     # Control: EGO
@@ -768,7 +881,6 @@ class CarlaOvertakeEnv(gym.Env):
         # but it can vary depending on your coordinate system.
         # We invert the sign if needed:
         return carla.VehicleControl(throttle=throttle, steer=steer, brake=brake)
-
     # --------------------------------------------------------------------------
     # Control: NONEGO
     # --------------------------------------------------------------------------
@@ -842,6 +954,8 @@ class CarlaOvertakeEnv(gym.Env):
 
         return output, updated_errors   
 
+
+
     # --------------------------------------------------------------------------
     # Reward
     # --------------------------------------------------------------------------
@@ -888,6 +1002,7 @@ class CarlaOvertakeEnv(gym.Env):
         angle_offset = angle_offset/ np.pi
     
         return angle_offset
+    
 
     def _compute_reward(self):
 
@@ -1036,6 +1151,41 @@ class CarlaOvertakeEnv(gym.Env):
 
         return total_reward, reward_components
     
+    
+    # Add to class CarlaLaneFollowingStudentEnv
+    
+    # def _compute_reward(self):
+
+    #     total_reward = 0.0
+    #     reward_components = {}
+
+
+
+    #     # (A) Goal 
+    #     dist_goal = self.ego.get_location().distance(self.end_point.location)
+        
+
+    #     r_goal = 0.0
+    #     if dist_goal < 5.0:
+    #         r_goal = 200.0
+        
+    #     reward_components["goal"] = r_goal
+
+    #     total_reward = r_goal
+
+    #     collision     = self.collision_detected
+
+    #     if collision > 0:
+    #         total_reward -= 300
+    #         reward_components["collision"] = -300
+    #     else:
+    #         reward_components["collision"] = 0
+
+    #     ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
+    #     dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
+
+    #     total_reward += self.compute_goal_reward(ag[None], dg[None], reward_components)[0]
+    #     return total_reward, reward_components
 
     # --------------------------------------------------------------------------
     # Termination Conditions
@@ -1048,33 +1198,19 @@ class CarlaOvertakeEnv(gym.Env):
             return 0
         else:
             return self.get_location_distance(ego_location, self.waypoints[0])
-
-
+        
+    
     def _check_termination(self):
 
-        """
-        Returns
-        -------
-        terminated : bool    # True = task success/failure that should propagate gradients
-        truncated  : bool    # True = time-limit or external cut
-        info       : dict    # diagnostics
-        """
-        # --- gather episode facts ---------------------------------------------
         collision     = self.collision_detected
-
-        ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
-        dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
-        reached_goal = float(np.linalg.norm(ag - dg) < self.goal_radius)
-        # reached_goal  = self.ego.get_location().distance(self.end_point.location) < 2.0
+        reached_goal  = self.ego.get_location().distance(self.end_point.location) < 2.0
         time_exceeded = self._time_step >= self._max_time_step
 
         # low-speed: share the threshold with the reward code
         LOW_SPEED_KMH       = 1.0
         LOW_SPEED_TIMEOUT_S = 10.0
 
-        # if self.speed_kmh < LOW_SPEED_KMH:
-        spd = float(self.speed_kmh) if self.speed_kmh is not None else LOW_SPEED_KMH + 1.0
-        if spd < LOW_SPEED_KMH:
+        if self.speed_kmh < LOW_SPEED_KMH:
             if self.low_speed_start_time is None:
                 self.low_speed_start_time = time.time()
         else:
@@ -1156,6 +1292,7 @@ class CarlaOvertakeEnv(gym.Env):
             info["time_exceeded"] = True
             info["elapsed_steps"] = self._time_step
 
+
         elif out_of_lane:
             terminated = True
             info["out_of_lane"] = True
@@ -1168,7 +1305,9 @@ class CarlaOvertakeEnv(gym.Env):
         else:
             self.reset_other_vehicles()
 
-        return terminated , info
+        return terminated, info
+
+
 
     # --------------------------------------------------------------------------
     # Cleanup
