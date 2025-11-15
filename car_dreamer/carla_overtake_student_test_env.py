@@ -7,9 +7,9 @@ import random
 import time
 import cv2
 
-
 from .toolkit.planner import FixedEndingPlanner
 from .toolkit import TTCCalculator, get_location_distance, get_vehicle_pos
+from .carla_base_env import CarlaBaseEnv
 
 from typing import Tuple
 
@@ -18,29 +18,22 @@ from pathlib import Path
 import os
 
 from collections import deque
+import weakref, queue
 
+EGO_SPAWN_POINT = [[-515.14, 180.42, 1.0,0,90,0], 
+                   [-511.30, 180.42, 1.0,0,90,0],
+                   [-507.37, 180.42, 1.0,0,90,0], 
+                   [-503.85, 180.42, 1.0,0,90,0], ]
 
-EGO_SPAWN_POINT = [[-16.890745162963867, -211.24720764160156, 0.2819424271583557, 0.0, 89.7751235961914, 0.0],
-                   [-13.395880699157715, -212.56092834472656, 0.2819424271583557, 0.0, 89.7751235961914, 0.0],
-                   [-9.890790939331055, -211.27468872070312,  0.2819424271583557, 0.0, 89.7751235961914, 0.0],
-                   [-6.395920276641846, -212.58840942382812, 0.2819424271583557, 0.0, 89.7751235961914, 0.0]]
+NON_EGO_SPAWN_POINT = [[-515.14, 200.42, 1.0,0,90,0], 
+                   [-511.30, 200.42, 1.0,0,90,0],
+                   [-507.37, 200.42, 1.0,0,90,0], 
+                   [-503.85, 200.42, 1.0,0,90,0], ]
 
-
-NON_EGO_SPAWN_POINT = [[-16.712175369262695, -165.74740600585938, 0.2819424271583557, 0.0, 89.7751235961914, 0.0],
-                   [-13.221610069274902, -168.1611328125, 0.2819424271583557, 0.0, 89.7751235961914, 0.0], 
-                   [-9.712218284606934, -165.77487182617188, 0.2819424271583557, 0.0, 89.7751235961914, 0.0], 
-                   [-6.2216644287109375, -168.18861389160156, 0.2819424271583557, 0.0, 89.7751235961914, 0.0]]
-
-
-# EGO_END_POINT =    [[-16.520898818969727, -117.01853942871094, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
-#                    [-13.030336380004883, -119.4322738647461, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
-#                    [-9.520939826965332, -117.04601287841797, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
-#                    [-6.030386447906494, -119.45975494384766, 0.2819424271583557, 0.0, 89.77516174316406, 0.0]]
-
-EGO_END_POINT =    [[-16.520898818969727, -155.01853942871094, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
-                   [-13.030336380004883, -155.4322738647461, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
-                   [-9.520939826965332, -155.04601287841797, 0.2819424271583557, 0.0, 89.77516174316406, 0.0],
-                   [-6.030386447906494, -155.45975494384766, 0.2819424271583557, 0.0, 89.77516174316406, 0.0]]
+EGO_END_POINT = [[-515.14, 229.07, 1.0,0,90,0], 
+                   [-511.30, 229.07, 1.0,0,90,0],
+                   [-507.37, 229.07, 1.0,0,90,0], 
+                   [-503.85, 229.07, 1.0,0,90,0], ]
 
 
 DISCRETE_ACC = [0.0, 0.3] # discrete value of accelerations
@@ -81,9 +74,6 @@ TERMINAL = {
       'lane_width': 3.4,
       'terminal_dist': 100, # terminate tasks
 }
-
-
-
 # --------------------------------------------------------------------------------
 # A helper function to compute 2D distances
 # --------------------------------------------------------------------------------
@@ -97,30 +87,54 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
     def __init__(self, config):
         super().__init__()
 
+        self._config = config
+
         # Connect to a running CARLA instance or create a new one
         self.client = carla.Client("localhost", 3000)
-        self.client.set_timeout(100.0)
+        self.client.set_timeout(300.0)
 
-        self.world = self.client.load_world("Town04")
+        w = self.client.get_world()
+
+        try:
+            name = w.get_map().name
+        except RuntimeError:
+            name = ""
+        if name != "Carla/Maps/Town04":
+            w = self.client.load_world("Town04")
+
+        self.world = w
+
+        try:
+            # Remove static parked cars from the map
+            self.world.unload_map_layer(carla.MapLayer.ParkedVehicles)
+        except Exception:
+            # Older CARLA versions may not have MapLayer; ignore.
+            pass
+
         self.map = self.world.get_map()
-        # assert self.map.name == "Town01"
+
+        settings = self.world.get_settings()
+        if not settings.synchronous_mode or settings.fixed_delta_seconds != 0.1:
+            settings.synchronous_mode = True
+            settings.fixed_delta_seconds = 0.1
+            self.world.apply_settings(settings)
+        self._sync_enabled = True
+
+        # self.world.wait_for_tick(5.0)
+        
 
         print("CARLA environment initialized")
         print("Map name:", self.map.name)
 
+        self._hard_world_cleanup()
+
         # remove old vehicles and sensors (in case they survived)
         self.world.tick()
-        actor_list = self.world.get_actors()
-        for vehicle in actor_list.filter("*vehicle*"):
-            print("Warning: removing old vehicle")
-            vehicle.destroy()
-        for sensor in actor_list.filter("*sensor*"):
-            print("Warning: removing old sensor")
-            sensor.destroy()
+        
 
         # Load or get the world
-        self.world = self.client.get_world()
-        self.map = self.world.get_map()
+        # self.world = self.client.get_world()
+        # self.map = self.world.get_map()
 
         # Keep track of spawned actors to destroy them on reset
         self.ego = None
@@ -160,7 +174,12 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         # Setup blueprint library
         self.blueprint_library = self.world.get_blueprint_library()
 
-        self.spawn_index = np.random.randint(0, len(NON_EGO_SPAWN_POINT) - 1)
+        # self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
+
+        self._spawn_queue = deque(np.random.permutation(len(EGO_SPAWN_POINT)))
+        self.spawn_index = self._spawn_queue.popleft()
+
+
 
         self.ego_transform = carla.Transform(
             carla.Location(x = EGO_SPAWN_POINT[self.spawn_index][0], y = EGO_SPAWN_POINT[self.spawn_index][1], z = EGO_SPAWN_POINT[self.spawn_index][2]),
@@ -179,13 +198,6 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
 
         self.speed_kmh = None
 
-        # For Data Collection
-
-        # Keep track of episode and step
-        save_dir="data"
-        self.save_dir = Path(save_dir)
-        self.save_dir.mkdir(parents=True, exist_ok=True)
-
         self.episode_id = 0
         self.timestep = 0
 
@@ -195,6 +207,56 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.initial_distance_to_goal = 270
         self.previous_lane_invasions = 0
         self.previous_collisions = 0
+
+        self._last_rgb = None
+
+        self.goal_radius = 2.0     # meters
+        self.R_goal = 200.0
+        self.R_collision = 150.0   # moderate to avoid "always stop"
+
+        self._collision_step = False
+        self._lane_invasion_step = False
+
+    def _hard_world_cleanup(self):
+        actors = self.world.get_actors()
+        victims = []
+        for a in actors:
+            tid = a.type_id
+            if tid.startswith('vehicle.') or tid.startswith('walker.') or tid.startswith('sensor.'):
+                victims.append(carla.command.DestroyActor(a))
+        if victims:
+            self.client.apply_batch_sync(victims, True)
+            self.world.tick()
+
+    def _get_teacher_state(self):
+        rgb = self._pull_latest_image(timeout=0.5)
+        self.camera_image2 = rgb
+        self.camera_image = cv2.resize(rgb, (128, 128), interpolation=cv2.INTER_AREA)
+        return {
+            "image": self.camera_image,
+            "collision": 1 if self.collision_detected else 0,
+            "lane_invasion": 1 if self.lane_invasion_detected else 0,
+        }
+    
+
+    def _next_spawn_index(self):
+        if not self._spawn_queue:
+            self._spawn_queue.extend(np.random.permutation(len(EGO_SPAWN_POINT)))
+        return self._spawn_queue.popleft()
+    
+
+    def compute_goal_reward(self, ag, dg, info):
+        success = np.linalg.norm(ag - dg, axis=-1) < self.goal_radius
+        if np.isscalar(success):
+            if success: return self.R_goal
+            if info.get("collision", False): return -self.R_collision
+            return 0.0
+        # batched
+        r = np.zeros(len(success), np.float32)
+        r[success] = self.R_goal
+        # if you propagate collision flags per step, set negatives there; else keep 0
+        return r
+
 
     # --------------------------------------------------------------------------------
     # Reset the ego vehicle spawning
@@ -271,7 +333,8 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             raise RuntimeError(f"Could not spawn Non-Ego Vehicle after {max_attempts} attempts.")
 
         if self.nonego is not None:
-            self.nonego.set_autopilot(True, traffic_manager.get_port())
+            # self.nonego.set_autopilot(True, traffic_manager.get_port())
+            self.nonego.set_autopilot(False)
             # For example, 70% slower than usual
             traffic_manager.vehicle_percentage_speed_difference(self.nonego, 100)
             self.actors.append(self.nonego)
@@ -283,39 +346,88 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
     # --------------------------------------------------------------------------
     # Observations
     # --------------------------------------------------------------------------
+    def _pull_latest_image(self, timeout=0.2):
+        rgb = None
+        if hasattr(self, "_img_q"):
+            end = time.time() + timeout
+            while True:
+                try:
+                    # (frame_id, arr)
+                    fid, arr = self._img_q.get(timeout=max(0, end - time.time()))
+                    rgb = arr
+                    # drain to newest without blocking
+                    while True:
+                        fid, arr = self._img_q.get_nowait()
+                        rgb = arr
+                except queue.Empty:
+                    break
+        if rgb is not None:
+            self._last_rgb = rgb
+            return rgb
+        # fallback: last good frame, else keep previous image without refreshing
+        return self._last_rgb if self._last_rgb is not None else np.zeros((512,512,3), np.uint8)
+
     def _get_observation(self):
+        rgb = self._pull_latest_image(timeout=0.5)
+        self.camera_image2 = rgb
+        self.camera_image = cv2.resize(rgb, (128, 128), interpolation=cv2.INTER_AREA)
 
-        camera_obs = self.camera_image
+        ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
+        dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
+        return {
+            "image": self.camera_image,
+            "collision": 1 if self.collision_detected else 0,
+            "lane_invasion": 1 if self.lane_invasion_detected else 0,
+            # "achieved_goal": ag,
+            # "desired_goal": dg,
 
-        if camera_obs is not None:
-            pass
-            # for _ in range(4):
-            #     self.frame_buffer.append(camera_obs.copy())  # Ensure a separate copy is stored
-        else:
-            camera_obs = np.zeros((128 , 128 , 3), dtype=np.uint8)
-            # for _ in range(4):
-            #     self.frame_buffer.append(camera_obs.copy())  # Ensure a separate copy is stored
-
-        # camera_obs = np.concatenate(list(self.frame_buffer), axis=-1).astype(np.float32) / 255.0
-
-        collision_flag = 1 if self.collision_detected else 0
-        lane_invasion_flag = 1 if self.lane_invasion_detected else 0
-
-        obs = {
-            "image": camera_obs,
-            "collision": collision_flag,
-            "lane_invasion": lane_invasion_flag
         }
-        
-        return obs
 
     # --------------------------------------------------------------------------
     # Gym methods: reset, step, (optional) render, close
     # --------------------------------------------------------------------------
+
+        # --------------------------------------------------------------------------
+    # Gym methods: reset, step, (optional) render, close
+    # --------------------------------------------------------------------------
+
+    def _safe_destroy(self,actor):
+        # CARLA actors become invalid immediately after destroy().
+        # This guard ensures we don't crash if the actor is already dead or invalid.
+        if actor is None:
+            return
+        try:
+            # `.is_alive` is cheap; only destroy when true.
+            if getattr(actor, "is_alive", False):
+                actor.destroy()
+        except RuntimeError:
+            # "trying to operate on a destroyed actor" → ignore and proceed
+            pass
+
+    def _destroy_batch(self, world, actors):
+        # Prefer batched destruction to avoid racey per-actor calls.
+        actors = [a for a in actors if a is not None and getattr(a, "is_alive", False)]
+        if not actors:
+            return
+        try:
+            cmds = [carla.command.DestroyActor(a) for a in actors]
+            world.apply_batch_sync(cmds, True)
+        except Exception:
+            # Fall back to per-actor best-effort
+            for a in actors:
+                self._safe_destroy(a)
+
+
     def reset(self):
+        self._hard_world_cleanup()
         self._clean_actors()
-    
-        self.spawn_index = np.random.randint(0, len(NON_EGO_SPAWN_POINT) - 1)
+
+        if not self._spawn_queue:
+            self._spawn_queue = deque(np.random.permutation(len(EGO_SPAWN_POINT)))
+        self.spawn_index = self._spawn_queue.popleft()
+
+
+        # self.spawn_index = np.random.randint(0, len(EGO_SPAWN_POINT))
 
         self.ego_transform = carla.Transform(
             carla.Location(x = EGO_SPAWN_POINT[self.spawn_index][0], y = EGO_SPAWN_POINT[self.spawn_index][1], z = EGO_SPAWN_POINT[self.spawn_index][2]),
@@ -349,6 +461,11 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.collision_detected = False
         self.collision_hist = []
 
+        self._destroy_batch(self.world, [self.nonego] + getattr(self, "other_vehicles", []))
+        self.nonego = None
+        self.other_vehicles = []
+        self.world.tick()  # ensure destruction applies before respawn
+
         self.world.tick()
 
         self.reset_vehicle()
@@ -363,9 +480,9 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         # self.actors = [self.nonego, self.ego]
 
         # Initialize the vehicle with default controls
-        self.ego.apply_control(carla.VehicleControl(steer=0.0, throttle=0.0, brake=0.0))
+        self.ego.apply_control(carla.VehicleControl(manual_gear_shift=False, reverse=False, hand_brake=False,steer=0.0, throttle=0.0, brake=0.0))
         time.sleep(1)  # Allow time for sensors to initialize
-        
+
         self.episode_start = time.time()
 
         # Attach collision sensor to ego to detect collisions
@@ -377,9 +494,11 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         # Attach camera sensor to ego
         self.setup_camera()
 
+        self.world.tick()
+        
         # Path planning
         ego_dest = EGO_END_POINT[self.spawn_index]
-        dest_location = carla.Location(x=self.nonego_spawn_point[0], y=ego_dest[1], z=ego_dest[2])
+        dest_location = carla.Location(x=ego_dest[0], y=ego_dest[1], z=ego_dest[2])
         self.ego_planner = FixedEndingPlanner(self.ego, dest_location)
         self.waypoints, self.planner_stats = self.ego_planner.run_step()
         self.num_completed = self.planner_stats["num_completed"]
@@ -400,6 +519,11 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.low_speed_start_time = None
         self.speed_kmh = None
         self.previous_collisions = 0
+        self.previous_lane_invasions = 0
+
+        self._collision_step = False
+        self._lane_invasion_step = False
+
         
 
         print("Environment reset")
@@ -411,6 +535,7 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.initial_distance_to_goal = self.ego.get_location().distance(self.end_point.location)
         self.last_distance_to_goal = self.ego.get_location().distance(self.end_point.location)
 
+        self.last_num_completed = 0
 
         # Return initial observation
         return self._get_observation()
@@ -434,29 +559,35 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         nonego control, ticks the world, calculates reward, checks terminal.
         """
 
-        obs_current = self._get_observation()
+        # obs_current = self._get_observation()
 
-        curr_path = "data/" + str(self.episode_id) + "/curr"
-        curr_path = Path(curr_path)
-        next_path = "data/" + str(self.episode_id) + "/next"
-        next_path = Path(next_path)
+        # if self.save_every_n and (self.timestep % self.save_every_n == 0):
+        #     np.save(str(img_path.with_suffix('.npy')), obs_current["image"])
+        #     oc = str(img_path)
+        # else:
+        #     oc = None  # or keep a placeholder
 
-        curr_path.mkdir(parents=True, exist_ok=True)
-        next_path.mkdir(parents=True, exist_ok=True)
+        # curr_path = "data/" + str(self.episode_id) + "/curr"
+        # curr_path = Path(curr_path)
+        # next_path = "data/" + str(self.episode_id) + "/next"
+        # next_path = Path(next_path)
 
-        # 2. Save the image to disk if it exists
-        if obs_current["image"] is not None: 
-            # Create a filename like episode_0_step_0.jpg
-            img_name = f"episode_{self.episode_id}_step_{self.timestep}"
-            img_path = curr_path / img_name
+        # curr_path.mkdir(parents=True, exist_ok=True)
+        # next_path.mkdir(parents=True, exist_ok=True)
+
+        # # 2. Save the image to disk if it exists
+        # if obs_current["image"] is not None: 
+        #     # Create a filename like episode_0_step_0.jpg
+        #     img_name = f"episode_{self.episode_id}_step_{self.timestep}"
+        #     img_path = curr_path / img_name
             
-            # obs["image"] is a numpy array in BGR or RGB
-            # cv2.imwrite(str(img_path), obs_current["image"]) 
-            np.save(str(img_path.with_suffix('.npy')), obs_current["image"]) 
+        #     # obs["image"] is a numpy array in BGR or RGB
+        #     # cv2.imwrite(str(img_path), obs_current["image"]) 
+        #     np.save(str(img_path.with_suffix('.npy')), obs_current["image"]) 
             
-            # Replace the image in your transition with the *filename* only
-            oc = str(img_path)
-
+        #     # Replace the image in your transition with the *filename* only
+        #     oc = str(img_path)
+        obs = self._get_observation()
         # 1. Apply Ego action
         self.apply_control(action)
 
@@ -465,38 +596,51 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
 
         # 3. Tick the world
         self.world.tick()
-
         if self.nonego is not None and self.nonego.is_alive:
             pass
         else:
             if self.nonego is not None:
-                self.nonego.destroy()
-            if self.nonego.is_alive:
-                self.nonego.destroy()
+                self._safe_destroy(self.nonego)
+                self.nonego = None
+                # self.nonego.destroy()
+            # if self.nonego.is_alive:
+            #     self.nonego.destroy()
+            self._destroy_batch(self.world, getattr(self, "other_vehicles", []))
+            self.other_vehicles = []
             self.reset_other_vehicles()
-
+        
         # 4. Update waypoint
 
         self.waypoints, self.planner_stats = self.ego_planner.run_step()
         self.num_completed = self.planner_stats["num_completed"]
 
-        #compute speed
+        #4. compute speed
         self.velocity = self.ego.get_velocity()
         self.speed_kmh = 3.6 * math.sqrt(self.velocity.x**2 + self.velocity.y**2 + self.velocity.z**2)
 
         # 5. Compute observation
-        obs = self._get_observation()
+        
 
         # 6) Save the *next* obs image to disk
-        if obs["image"] is not None:
-            img_name = f"episode_{self.episode_id}_step_{self.timestep}_next"
-            img_path = next_path / img_name
+        # if obs["image"] is not None:
+        #     img_name = f"episode_{self.episode_id}_step_{self.timestep}_next"
+        #     # img_path = next_path / img_name
             
-            # cv2.imwrite(str(img_path), obs["image"]) 
-            np.save(str(img_path.with_suffix('.npy')), obs["image"])
-            on = str(img_path)
-        # 6. Compute reward
+        #     # cv2.imwrite(str(img_path), obs["image"]) 
+        #     np.save(str(img_path.with_suffix('.npy')), obs["image"])
+        #     on = str(img_path)
+
+        # 7. Compute reward
         reward, info_dict = self._compute_reward()
+
+        info_dict["collision_step"] = int(self._collision_step)
+        self._collision_step = False
+
+        info_dict["lane_invasion_step"] = int(self._lane_invasion_step)
+        self._lane_invasion_step = False
+
+        info_dict["off_center_m"] = abs(self.get_signed_lane_offset())
+
 
         # 4. Check termination
         done, terminal_info = self._check_termination()
@@ -504,19 +648,20 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         if done == True:
             print("terminal_info", terminal_info)
 
+
         info = {**info_dict, **terminal_info}
 
         # store the transition in the buffer
-        transition = {
-            "observation": oc,
-            "action": action,
-            "reward": reward,
-            "done": done,
-            "next_observation": on,
-            "info": info
-        }
+        # transition = {
+        #     "observation": oc,
+        #     "action": action,
+        #     "reward": reward,
+        #     "done": done,
+        #     "next_observation": on,
+        #     "info": info
+        # }
 
-        self.episode_buffer.append(transition)
+        # self.episode_buffer.append(transition)
 
         # if episode ended, optionally store or process
         if done:
@@ -524,12 +669,18 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             # self.all_episodes_data.append(self.episode_buffer)
 
             # Example 2: or write it to disk
-            self._save_episode_to_disk(self.episode_buffer)
+            # self._save_episode_to_disk(self.episode_buffer)
             self.episode_id += 1
 
         # 7. show the image
         if self.camera_image2 is not None:
-            resized_image = cv2.resize(self.camera_image2, (512, 512), interpolation=cv2.INTER_LINEAR)
+            frame = self.camera_image2.copy()
+            hud_text = f"Spawn idx: {self.spawn_index}"
+            cv2.putText(frame, hud_text, (16, 40), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.1, (255, 255, 255), 2, cv2.LINE_AA)
+
+
+            resized_image = cv2.resize(frame, (512, 512), interpolation=cv2.INTER_LINEAR)
               
             cv2.imshow("EgoCamera", resized_image)
             cv2.waitKey(1)
@@ -549,8 +700,30 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         """
         Properly close the env, destroy actors, etc.
         """
+        
+        settings = self.world.get_settings()
+        settings.synchronous_mode = False
+        settings.fixed_delta_seconds = None
+        self.world.apply_settings(settings)
+        self._sync_enabled = False
+
+        self._destroy_batch(self.world, [self.nonego] + getattr(self, "other_vehicles", []))
+        self.nonego = None
+        self.other_vehicles = []
+
         self._clean_actors()
         pass
+
+    def get_signed_lane_offset(self) -> float:
+        loc = self.ego.get_location()
+        wp  = self.world.get_map().get_waypoint(
+            loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+        center = wp.transform.location
+        right  = wp.transform.get_right_vector()
+        # signed meters: right positive, left negative
+        v = np.array([loc.x - center.x, loc.y - center.y], np.float32)
+        r = np.array([right.x, right.y], np.float32)
+        return float(np.dot(v, r) / max(1e-6, np.linalg.norm(r)))
 
     # --------------------------------------------------------------------------
     # Setup Spaces
@@ -576,11 +749,14 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
 
         collision_space = spaces.Discrete(2)     # 0 or 1
         lane_invasion_space = spaces.Discrete(2) # 0 or 1
+        goal_space  = spaces.Box(-1e6, 1e6, shape=(2,), dtype=np.float32)
 
         return spaces.Dict({
             "image": camera_space,
             "collision": collision_space,
-            "lane_invasion": lane_invasion_space
+            "lane_invasion": lane_invasion_space,
+            # "achieved_goal": goal_space, 
+            # "desired_goal": goal_space,
         })
 
     # --------------------------------------------------------------------------
@@ -593,12 +769,40 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.camera.set_attribute("image_size_x", f"{512}")
         self.camera.set_attribute("image_size_y", f"{512}")
         self.camera.set_attribute("fov", "110")
+        self.camera.set_attribute("sensor_tick", "0.1")  # = fixed_delta_seconds
 
         # camera_spawn = carla.Transform(carla.Location(x=1.5, z=1.8), carla.Rotation(pitch=0)) 
         camera_spawn = carla.Transform(carla.Location(z=20), carla.Rotation(pitch=-90)) 
         self.camera_sensor = self.world.spawn_actor(self.camera, camera_spawn, attach_to=self.ego)
         self.actors.append(self.camera_sensor)
-        self.camera_sensor.listen(lambda data: self.camera_callback(data))
+
+        self._img_q = queue.Queue(maxsize=8)
+        ws = weakref.ref(self)
+
+        def _on_image(img, q=self._img_q, ws=ws):
+            s = ws()
+            if s is None:
+                return
+            # minimal and fast; no resize here
+            img.convert(carla.ColorConverter.CityScapesPalette)
+            arr = np.frombuffer(img.raw_data, dtype=np.uint8).reshape((img.height, img.width, 4))[:, :, :3]
+            item = (img.frame, arr)                    
+            try:
+                q.put_nowait(item)
+            except queue.Full:
+                try: q.get_nowait()
+                except queue.Empty: pass
+                q.put_nowait(item)
+
+        self.camera_sensor.listen(_on_image)
+
+        # warm up: wait for first frame so reset() doesn't show black
+        for _ in range(3):
+            self.world.tick()
+            try:
+                self._img_q.get(timeout=0.5)
+            except queue.Empty:
+                pass
 
     def setup_collision_sensor(self):
         collision_sensor_bp = self.blueprint_library.find("sensor.other.collision")
@@ -634,9 +838,13 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.collision_hist.append(event)
         self.collision_detected = True
 
+        self._collision_step = True 
+
     def lane_invasion_data(self, event):
         self.lane_invasion_hist.append(event)
         self.lane_invasion_detected = True
+
+        self._lane_invasion_step = True
 
     # --------------------------------------------------------------------------
     #Apply Control
@@ -663,19 +871,10 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         throttle = acc #np.clip(acc, 0, 0.2)
         brake = 0.0
 
-        # if acc > 0:
-        #     # throttle = np.clip(acc / 3.0, 0, 1)
-        #     throttle = acc
-        #     brake = 0.0
-        # else:
-        #     throttle = 0.0
-        #     brake = np.clip(-acc / 3.0, 0, 1)
-
         # steer in CARLA is left-negative, right-positive,
         # but it can vary depending on your coordinate system.
         # We invert the sign if needed:
-        return carla.VehicleControl(throttle=throttle, steer=-steer, brake=brake)
-
+        return carla.VehicleControl(throttle=throttle, steer=steer, brake=brake)
     # --------------------------------------------------------------------------
     # Control: NONEGO
     # --------------------------------------------------------------------------
@@ -688,7 +887,7 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
 
         # Keep constant speed
         if abs(self.nonego.get_velocity().y) < 2:
-            acc = 2
+            acc = 0.5
         else:
             acc = 0
 
@@ -715,11 +914,11 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
 
         # Convert acceleration to throttle and brake
         if acc > 0:
-            throttle = np.clip(acc / 3, 0, 1)
-            brake = 0
+            throttle = 0
+            brake = 1
         else:
             throttle = 0
-            brake = np.clip(-acc / 3, 0, 1)
+            brake = 1
 
         return carla.VehicleControl(throttle=float(throttle), steer=float(-steer), brake=float(brake))
 
@@ -749,12 +948,7 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
 
         return output, updated_errors   
 
-    # --------------------------------------------------------------------------
-    # Destination
-    # --------------------------------------------------------------------------
 
-    def is_destination_reached(self):
-        return len(self.waypoints) <= 3 
 
     # --------------------------------------------------------------------------
     # Reward
@@ -802,6 +996,7 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         angle_offset = angle_offset/ np.pi
     
         return angle_offset
+    
 
     def _compute_reward(self):
 
@@ -846,8 +1041,8 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             return 0
         else:
             return self.get_location_distance(ego_location, self.waypoints[0])
-
-
+        
+    
     def _check_termination(self):
 
         collision     = self.collision_detected
@@ -955,64 +1150,30 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
 
         return terminated, info
 
+
+
     # --------------------------------------------------------------------------
     # Cleanup
     # --------------------------------------------------------------------------
     def _clean_actors(self):
-        """
-        Clean up all actors, sensors, and OpenCV windows.
-        """
         try:
-            # Destroy actors in the actor list
-            for actor in self.actors:
-                if actor.is_alive:
-                    actor.destroy()
-                    time.sleep(0.1)  # Brief delay to ensure destruction
-            self.actors.clear()  # Clear the actor list
-
-            # Explicitly set vehicle and sensor references to None
-            if self.ego:
-                if self.ego.is_alive:
-                    self.ego.destroy()
-                self.ego = None
-
-            if self.nonego:
-                if self.nonego.is_alive:
-                    self.nonego.destroy()
-                self.nonego = None
-
-            if hasattr(self, 'camera_sensor') and self.camera_sensor:
-                if self.camera_sensor.is_alive:
-                    self.camera_sensor.destroy()
-                self.camera_sensor = None
-
-            if hasattr(self, 'colsensor') and self.colsensor:
-                if self.colsensor.is_alive:
-                    self.colsensor.destroy()
-                self.colsensor = None
-
-            if hasattr(self, 'lane_sensor') and self.lane_sensor:
-                if self.lane_sensor.is_alive:
-                    self.lane_sensor.destroy()
-                self.lane_sensor = None
-
-            # Additional cleanup for remaining vehicle actors as a fallback
-            remaining_actors = self.world.get_actors().filter('vehicle.*')
-            if remaining_actors:
-                print(f"Warning: There are still {len(remaining_actors)} vehicle actors in the world.")
-                for actor in remaining_actors:
-                    if actor.is_alive:
-                        actor.destroy()
-                        time.sleep(0.1)
-                left_remaining_actors = self.world.get_actors().filter('vehicle.*')
-                print(f"Warning: There are still {len(left_remaining_actors)} vehicle actors left in the world.")
-                for actor in left_remaining_actors:
-                        actor.destroy()
-                        time.sleep(0.1)
-
-            # Close OpenCV windows safely
-            # cv2.destroyAllWindows()
-            self.world.tick()  # ✅ Ensures actors are properly removed
-
+            for s in ("camera_sensor", "colsensor", "lane_sensor"):
+                sensor = getattr(self, s, None)
+                if sensor:
+                    sensor.stop()
+            batch = []
+            for a in list(self.actors):
+                if a and a.is_alive:
+                    batch.append(carla.command.DestroyActor(a))
+            if self.ego and self.ego.is_alive:
+                batch.append(carla.command.DestroyActor(self.ego))
+            if batch:
+                self.client.apply_batch_sync(batch, True)
+            self.actors.clear()
+            self.ego = self.nonego = self.camera_sensor = self.colsensor = self.lane_sensor = None
+            if getattr(self, "_sync_enabled", False):
+                self.world.tick()
         except Exception as e:
             print(f"An error occurred during cleanup: {e}")
+
+        

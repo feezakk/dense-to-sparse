@@ -41,8 +41,8 @@
 
    ```bash
    bash train_dm3_student_bisim.sh 3000 0 \
-     --task carla_lane_overtake_student \
-     --dreamerv3.logdir ./logdir/carla_lane_overtaking_student/ \
+     --task carla_overtake_student \
+     --dreamerv3.logdir ./logdir/carla_overtaking_student/ \
      --dreamerv3.enable_bisim=False
    ```
 
