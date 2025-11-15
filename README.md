@@ -9,7 +9,7 @@
    ```bash
    bash train_dm3_teacher.sh 3000 0 \
      --task carla_overtake \
-     --dreamerv3.logdir ./logdir/carla_overtaking_teacher/
+     --dreamerv3.logdir ./logdir/carla_overtake_teacher/
    ```
 
 ### 2. Train Teacher Model - Lane Following
@@ -42,7 +42,7 @@
    ```bash
    bash train_dm3_student_bisim.sh 3000 0 \
      --task carla_overtake_student \
-     --dreamerv3.logdir ./logdir/carla_overtaking_student/ \
+     --dreamerv3.logdir ./logdir/carla_overtake_student/ \
      --dreamerv3.enable_bisim=False
    ```
 
