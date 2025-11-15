@@ -1,5 +1,7 @@
 ## Usage
 
+*** Distillation without bisimulation on CARLA Overtaking and Lane Following Tasks ***
+
 1. ** Train Teacher Model - Overtaking**
 
    Train the DreamerV3 teacher model for the overtaking task:
