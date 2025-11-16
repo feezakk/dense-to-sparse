@@ -1,6 +1,6 @@
 # Usage
 
-## Training Teacher on Dense Reward on CARLA Overtaking and Lane Following Tasks 
+## 1. Training Teacher on Dense Reward on CARLA Overtaking and Lane Following Tasks 
 
 ### 1. Train Teacher Model - Overtaking
 
@@ -18,7 +18,7 @@
    bash train_dm3_teacher.sh 3000 0 --task carla_lane_following --dreamerv3.logdir ./logdir/carla_lane_following_teacher/
    ```
 
-## Baseline Hindesight Experience Replay (HER) without distillation on CARLA Overtaking and Lane Following Tasks
+## 2. Baseline Hindesight Experience Replay (HER) without distillation on CARLA Overtaking and Lane Following Tasks
 
 ### 1. Train Model - Lane Following with HER without distillation
 
@@ -36,7 +36,7 @@
    bash train_dm3_HER.sh 3000 0 --task carla_overtake_student --dreamerv3.logdir ./logdir/carla_overtake_HER_without_distillation/
    ```
 
-## Baseline Hindesight Experience Replay (HER) with distillation on CARLA Overtaking and Lane Following Tasks
+## 3. Baseline Hindesight Experience Replay (HER) with distillation on CARLA Overtaking and Lane Following Tasks
 
 ### 1. Train Model - Lane Following with HER with distillation
 
@@ -54,7 +54,7 @@
    bash train_dm3_student_HER.sh 3000 0 --task carla_overtake_student --dreamerv3.logdir ./logdir/carla_overtake_HER_with_distillation/
    ```
 
-## Distillation on CARLA Overtaking and Lane Following Tasks 
+## 4. Baseline Distillation on CARLA Overtaking and Lane Following Tasks 
 
 ### 1. Train Student Model - Lane Following with distillation
 
@@ -93,7 +93,7 @@
     --dreamerv3.loss_scales.prior_stoch_kl=5.0
    ```
 
-## Train Student on Sparse Rewards on CARLA Overtaking and Lane Following Tasks 
+## 5. Train Student on Sparse Rewards on CARLA Overtaking and Lane Following Tasks 
 
 ### 1. Train  Student Model on Sparse Rewards - Overtaking
 
@@ -102,7 +102,7 @@
    ```bash
    bash train_dm3_teacher.sh 3000 0 \
      --task carla_overtake_student \
-     --dreamerv3.logdir ./logdir/carla_overtaking_teacher/
+     --dreamerv3.logdir ./logdir/carla_overtaking_student_sparse/
    ```
 
 ### 2. Train  Student Model on Sparse Rewards - Lane Following
@@ -112,7 +112,7 @@
    ```bash
    bash train_dm3_teacher.sh 3000 0 \
      --task carla_lane_following_student \
-     --dreamerv3.logdir ./logdir/carla_lane_following_teacher/
+     --dreamerv3.logdir ./logdir/carla_lane_following_student_sparse/
    ```
 
  
