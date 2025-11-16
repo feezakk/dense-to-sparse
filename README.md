@@ -82,3 +82,37 @@
      --task carla_lane_following_student \
      --dreamerv3.logdir ./logdir/carla_lane_following_teacher/
    ```
+
+ 
+
+### Evaluate Teacher - Overtaking Seen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake/checkpoint.ckpt --task carla_overtake --dreamerv3.logdir ./logdir/eval_overtake_teacher_seen
+   ```
+
+### Evaluate Teacher - Overtaking Unseen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake/checkpoint.ckpt --task carla_overtake_test --dreamerv3.logdir ./logdir/eval_overtake_teacher_unseen
+   ```
+
+### Evaluate Student - Overtaking Seen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_student/checkpoint.ckpt --task carla_overtake_student --dreamerv3.logdir ./logdir/eval_overtake_student_seen
+   ```
+
+### Evaluate Student - Overtaking Unseen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_student/checkpoint.ckpt --task carla_overtake_student_test --dreamerv3.logdir ./logdir/eval_overtake_student_unseen
+   ```

@@ -20,23 +20,18 @@ import os
 from collections import deque
 import weakref, queue
 
-EGO_SPAWN_POINT = [[-515.14, 180.42, 1.0,0,90,0], 
-                   [-511.30, 180.42, 1.0,0,90,0],
-                   [-507.37, 180.42, 1.0,0,90,0], 
-                   [-503.85, 180.42, 1.0,0,90,0], ]
+EGO_SPAWN_POINT = [[71.929916, -6.996726, 1.050581, 0.953298, -62.641895, 0.000000],
+                   [59.233459, -68.268501, 5.817840, 4.703701, -81.431274, 0.000000],
+                   [67.262825, -114.866020, 9.692015, 4.703701, -85.152115, 0.000000],
+                   [44.566227, -177.097443, 6.951100, -4.487109, -93.109505, 0.000000]]
 
-NON_EGO_SPAWN_POINT = [[-515.14, 200.42, 1.0,0,90,0], 
-                   [-511.30, 200.42, 1.0,0,90,0],
-                   [-507.37, 200.42, 1.0,0,90,0], 
-                   [-503.85, 200.42, 1.0,0,90,0], ]
+EGO_END_POINT =    [[59.233459, -68.268501, 5.817840, 4.703701, -81.431274, 0.000000],
+                   [67.262825, -114.866020, 9.692015, 4.703701, -85.152115, 0.000000],
+                   [44.566227, -177.097443, 6.951100, -4.487109, -93.109505, 0.000000],
+                   [6.476024, -241.105026, 1, 2.601381, -192.499680, 0.000000]]
 
-EGO_END_POINT = [[-515.14, 229.07, 1.0,0,90,0], 
-                   [-511.30, 229.07, 1.0,0,90,0],
-                   [-507.37, 229.07, 1.0,0,90,0], 
-                   [-503.85, 229.07, 1.0,0,90,0], ]
-
-
-DISCRETE_ACC = [0.0, 0.3] # discrete value of accelerations
+# DISCRETE_ACC = [0.0, 0.2, 0.4, 0.6, 1.0] # discrete value of accelerations
+DISCRETE_ACC = [0.0 , 0.3] # discrete value of accelerations
 DISCRETE_STEER = [-0.2, -0.1, 0.0, 0.1, 0.2] # discrete value of steering angles
 
 SWING_STEER = 0.04 # The background vehicle steer for swing .
@@ -62,18 +57,22 @@ REWARD = {
           'time': 0.0,
           'destination_reached': 20.0,
           'early_lane_change': 0.0,
-          'speed': 0.5,
         }
 }
 
 TERMINAL = {
       'out_lane_thres': 5, # threshold for out of lane
-      'time_limit': 500, # maximum timesteps per episode
+      'time_limit': 1000, # maximum timesteps per episode
       'left_lane_boundry': 3.7, # out of lane boundry
       'right_lane_boundry': 17.7,
       'lane_width': 3.4,
       'terminal_dist': 100, # terminate tasks
 }
+
+
+
+
+
 # --------------------------------------------------------------------------------
 # A helper function to compute 2D distances
 # --------------------------------------------------------------------------------
@@ -83,7 +82,7 @@ def distance_2d(loc1, loc2):
 # --------------------------------------------------------------------------------
 # Example single-file environment for overtaking
 # --------------------------------------------------------------------------------
-class CarlaOvertakeStudentTestEnv(gym.Env):
+class CarlaLaneFollowingStudentEnv(gym.Env):
     def __init__(self, config):
         super().__init__()
 
@@ -99,8 +98,8 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             name = w.get_map().name
         except RuntimeError:
             name = ""
-        if name != "Carla/Maps/Town04":
-            w = self.client.load_world("Town04")
+        if name != "Carla/Maps/Town07":
+            w = self.client.load_world("Town07")
 
         self.world = w
 
@@ -114,9 +113,9 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.map = self.world.get_map()
 
         settings = self.world.get_settings()
-        if not settings.synchronous_mode or settings.fixed_delta_seconds != 0.09:
+        if not settings.synchronous_mode or settings.fixed_delta_seconds != 0.1:
             settings.synchronous_mode = True
-            settings.fixed_delta_seconds = 0.09
+            settings.fixed_delta_seconds = 0.1
             self.world.apply_settings(settings)
         self._sync_enabled = True
 
@@ -197,6 +196,13 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.low_speed_start_time = None
 
         self.speed_kmh = None
+
+        # For Data Collection
+
+        # Keep track of episode and step
+        save_dir="data"
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
 
         self.episode_id = 0
         self.timestep = 0
@@ -283,66 +289,6 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
 
         self.ego.set_target_velocity(carla.Vector3D())
 
-    # --------------------------------------------------------------------------------
-    # Reset the non-ego vehicle spawning
-    # --------------------------------------------------------------------------------
-
-    def reset_other_vehicles(self):
-        
-        # Clear out old vehicles 
-        # self.client.apply_batch([carla.command.DestroyActor(x) for x in self.actors])
-        self.world.tick()
-
-        traffic_manager = self.client.get_trafficmanager()  
-        traffic_manager.set_global_distance_to_leading_vehicle(1.0)
-        traffic_manager.set_synchronous_mode(True)
-        
-        blueprint_library = self.world.get_blueprint_library()
-        vehicle_blueprint = blueprint_library.find('vehicle.tesla.model3')
-
-
-        self.nonego_spawn_point = NON_EGO_SPAWN_POINT[self.spawn_index]
-
-        nonego_transform = carla.Transform(
-            carla.Location(*self.nonego_spawn_point[:3]),
-            carla.Rotation(*self.nonego_spawn_point[-3:]),
-        )
-
-        # First, if self.nonego was previously alive, destroy it properly
-        if self.nonego is not None and self.nonego.is_alive:
-            print("Destroying old non-ego vehicle.")
-            self.nonego.destroy()
-            self.nonego = None
-            # Let CARLA process the destruction
-            self.world.tick()
-            time.sleep(0.1)
-
-        max_attempts = 10
-        for attempt in range(max_attempts):
-            actor = self.world.try_spawn_actor(vehicle_blueprint, nonego_transform)
-            if actor is not None:
-                self.nonego = actor
-                print(f"Non-Ego Vehicle Spawned on attempt {attempt+1}")
-                break
-            else:
-                print(f"Spawn failed (collision) on attempt {attempt+1}. Retrying...")
-                self.world.tick()
-                time.sleep(0.1)
-
-        if self.nonego is None:
-            raise RuntimeError(f"Could not spawn Non-Ego Vehicle after {max_attempts} attempts.")
-
-        if self.nonego is not None:
-            # self.nonego.set_autopilot(True, traffic_manager.get_port())
-            self.nonego.set_autopilot(False)
-            # For example, 70% slower than usual
-            traffic_manager.vehicle_percentage_speed_difference(self.nonego, 100)
-            self.actors.append(self.nonego)
-
-            print("Non-Ego Vehicle Set")
-
-        self.nonego_spawn_point = [nonego_transform.location.x, nonego_transform.location.y, nonego_transform.location.z]     
-
     # --------------------------------------------------------------------------
     # Observations
     # --------------------------------------------------------------------------
@@ -378,46 +324,14 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             "image": self.camera_image,
             "collision": 1 if self.collision_detected else 0,
             "lane_invasion": 1 if self.lane_invasion_detected else 0,
-            # "achieved_goal": ag,
-            # "desired_goal": dg,
+            "achieved_goal": ag,
+            "desired_goal": dg,
 
         }
 
     # --------------------------------------------------------------------------
     # Gym methods: reset, step, (optional) render, close
     # --------------------------------------------------------------------------
-
-        # --------------------------------------------------------------------------
-    # Gym methods: reset, step, (optional) render, close
-    # --------------------------------------------------------------------------
-
-    def _safe_destroy(self,actor):
-        # CARLA actors become invalid immediately after destroy().
-        # This guard ensures we don't crash if the actor is already dead or invalid.
-        if actor is None:
-            return
-        try:
-            # `.is_alive` is cheap; only destroy when true.
-            if getattr(actor, "is_alive", False):
-                actor.destroy()
-        except RuntimeError:
-            # "trying to operate on a destroyed actor" → ignore and proceed
-            pass
-
-    def _destroy_batch(self, world, actors):
-        # Prefer batched destruction to avoid racey per-actor calls.
-        actors = [a for a in actors if a is not None and getattr(a, "is_alive", False)]
-        if not actors:
-            return
-        try:
-            cmds = [carla.command.DestroyActor(a) for a in actors]
-            world.apply_batch_sync(cmds, True)
-        except Exception:
-            # Fall back to per-actor best-effort
-            for a in actors:
-                self._safe_destroy(a)
-
-
     def reset(self):
         self._hard_world_cleanup()
         self._clean_actors()
@@ -461,28 +375,18 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.collision_detected = False
         self.collision_hist = []
 
-        self._destroy_batch(self.world, [self.nonego] + getattr(self, "other_vehicles", []))
-        self.nonego = None
-        self.other_vehicles = []
-        self.world.tick()  # ensure destruction applies before respawn
-
         self.world.tick()
 
         self.reset_vehicle()
         if self.ego is not None:
             self.actors.append(self.ego)
 
-        self.reset_other_vehicles()
-        if self.nonego is not None:
-            self.actors.append(self.nonego)
-
         # Keep track of actors to destroy later
         # self.actors = [self.nonego, self.ego]
 
         # Initialize the vehicle with default controls
         self.ego.apply_control(carla.VehicleControl(manual_gear_shift=False, reverse=False, hand_brake=False,steer=0.0, throttle=0.0, brake=0.0))
-        time.sleep(1)  # Allow time for sensors to initialize
-
+        
         self.episode_start = time.time()
 
         # Attach collision sensor to ego to detect collisions
@@ -502,10 +406,6 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.ego_planner = FixedEndingPlanner(self.ego, dest_location)
         self.waypoints, self.planner_stats = self.ego_planner.run_step()
         self.num_completed = self.planner_stats["num_completed"]
-
-        self.exceeding = False
-        self.overtake = False
-        self.last_ego_y = EGO_SPAWN_POINT[self.spawn_index][1]
 
         # Set spectator for debugging
         spectator = self.world.get_spectator()
@@ -587,7 +487,7 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             
         #     # Replace the image in your transition with the *filename* only
         #     oc = str(img_path)
-        obs = self._get_observation()
+
         # 1. Apply Ego action
         self.apply_control(action)
 
@@ -596,18 +496,6 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
 
         # 3. Tick the world
         self.world.tick()
-        if self.nonego is not None and self.nonego.is_alive:
-            pass
-        else:
-            if self.nonego is not None:
-                self._safe_destroy(self.nonego)
-                self.nonego = None
-                # self.nonego.destroy()
-            # if self.nonego.is_alive:
-            #     self.nonego.destroy()
-            self._destroy_batch(self.world, getattr(self, "other_vehicles", []))
-            self.other_vehicles = []
-            self.reset_other_vehicles()
         
         # 4. Update waypoint
 
@@ -619,7 +507,7 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.speed_kmh = 3.6 * math.sqrt(self.velocity.x**2 + self.velocity.y**2 + self.velocity.z**2)
 
         # 5. Compute observation
-        
+        obs = self._get_observation()
 
         # 6) Save the *next* obs image to disk
         # if obs["image"] is not None:
@@ -707,10 +595,6 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.world.apply_settings(settings)
         self._sync_enabled = False
 
-        self._destroy_batch(self.world, [self.nonego] + getattr(self, "other_vehicles", []))
-        self.nonego = None
-        self.other_vehicles = []
-
         self._clean_actors()
         pass
 
@@ -755,8 +639,8 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             "image": camera_space,
             "collision": collision_space,
             "lane_invasion": lane_invasion_space,
-            # "achieved_goal": goal_space, 
-            # "desired_goal": goal_space,
+            "achieved_goal": goal_space, 
+            "desired_goal": goal_space,
         })
 
     # --------------------------------------------------------------------------
@@ -772,7 +656,7 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         self.camera.set_attribute("sensor_tick", "0.1")  # = fixed_delta_seconds
 
         # camera_spawn = carla.Transform(carla.Location(x=1.5, z=1.8), carla.Rotation(pitch=0)) 
-        camera_spawn = carla.Transform(carla.Location(z=20), carla.Rotation(pitch=-90)) 
+        camera_spawn = carla.Transform(carla.Location(z=10), carla.Rotation(pitch=-90)) 
         self.camera_sensor = self.world.spawn_actor(self.camera, camera_spawn, attach_to=self.ego)
         self.actors.append(self.camera_sensor)
 
@@ -851,9 +735,7 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
     # --------------------------------------------------------------------------
     def apply_control(self, action) -> None:
         control = self._get_vehicle_control(action)
-        nonego_control = self._get_nonego_vehicle_control()
         self.ego.apply_control(control)
-        self.nonego.apply_control(nonego_control)
 
     # --------------------------------------------------------------------------
     # Control: EGO
@@ -875,80 +757,6 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
         # but it can vary depending on your coordinate system.
         # We invert the sign if needed:
         return carla.VehicleControl(throttle=throttle, steer=steer, brake=brake)
-    # --------------------------------------------------------------------------
-    # Control: NONEGO
-    # --------------------------------------------------------------------------
-    def _get_nonego_vehicle_control(self):
-        """
-        Non-ego vehicle control is designed for the scenario.
-        """
-        ego_loc = self.ego.get_transform().location
-        nonego_loc = self.nonego.get_transform().location
-
-        # Keep constant speed
-        if abs(self.nonego.get_velocity().y) < 2:
-            acc = 0.5
-        else:
-            acc = 0
-
-        dist = math.sqrt((ego_loc.x - nonego_loc.x) ** 2 + (ego_loc.y - nonego_loc.y) ** 2)
-        swing_steer = SWING_STEER
-        swing_amplitude = SWING_AMPLITUDE
-        swing_trigger_dist = SWING_TRIGGER_DIST
-        if dist < swing_trigger_dist:
-            # Swing when ego vehicle approaching
-            if self.nonego_spawn_point[0] + swing_amplitude <= nonego_loc.x:
-                self.swing_direction = 1
-            if self.nonego_spawn_point[0] - swing_amplitude >= nonego_loc.x:
-                self.swing_direction = -1
-            steer = swing_steer * self.swing_direction
-            self.prev_errors = {
-                "last_error": 0.0,
-                "integral": 0.0,
-            }  # Reset the prev_error
-        else:
-            # Implement PID controller for lane keeping
-            coeffs = PID_COEFFS
-            steer, updated_errors = self.pid_controller(self.nonego_spawn_point[0], nonego_loc.x, self.prev_errors, coeffs)
-            self.prev_errors.update(updated_errors)
-
-        # Convert acceleration to throttle and brake
-        if acc > 0:
-            throttle = 0
-            brake = 1
-        else:
-            throttle = 0
-            brake = 1
-
-        return carla.VehicleControl(throttle=float(throttle), steer=float(-steer), brake=float(brake))
-
-    def pid_controller(self, target, current, prev_errors, coeffs):
-        """
-        Calculate the PID control output to minimize the deviation.
-
-        Args:
-        target (float): The target for the PID controller (central line x-coordinate).
-        current (float): The current measurement of the process variable (vehicle x-coordinate).
-        prev_errors (dict): A dictionary holding the last error and the integral of errors.
-        coeffs (tuple): A tuple of PID coefficients (Kp, Ki, Kd).
-
-        Returns:
-        float: The control output (steering angle adjustment).
-        dict: Updated dictionary with the last error and integral.
-        """
-        Kp, Ki, Kd = coeffs
-        error = current - target
-        integral = prev_errors["integral"] + error
-        derivative = error - prev_errors["last_error"]
-
-        output = (Kp * error) + (Ki * integral) + (Kd * derivative)
-
-        # Update the errors for the next call
-        updated_errors = {"last_error": error, "integral": integral}
-
-        return output, updated_errors   
-
-
 
     # --------------------------------------------------------------------------
     # Reward
@@ -997,38 +805,60 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
     
         return angle_offset
     
-
     def _compute_reward(self):
+        ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
+        dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
 
-        reward_components = {}
+        success = float(np.linalg.norm(ag - dg) < self.goal_radius)
+        r = self.R_goal if success else 0.0
 
-        dist_goal = self.ego.get_location().distance(self.end_point.location)
+        collided = bool(self.collision_detected)
+        if collided:
+            r -= self.R_collision
 
-        if self.spawn_index is not None:
-            # 2D version for clarity (discard z if you like)
-            v_goal = np.array([
-                self.end_point.location.x - EGO_SPAWN_POINT[self.spawn_index][0],
-                self.end_point.location.y - EGO_SPAWN_POINT[self.spawn_index][1]
-            ])
-            v_current = np.array([
-                self.ego.get_location().x - EGO_SPAWN_POINT[self.spawn_index][0],
-                self.ego.get_location().y - EGO_SPAWN_POINT[self.spawn_index][1]
-            ])
-            dot_goal = np.dot(v_goal, v_goal)          # ||SE||^2
-            dot_current = np.dot(v_goal, v_current)    # SE · SC
 
-        if dot_current > dot_goal:
-                r_goal = 200.0
-        elif dist_goal < 2.0:
-            r_goal = 200.0
-        else: 
-            r_goal = 0.0
+
+
+        info = {
+            "success": success,
+            "collision": collided,
+        }
+        return float(r), info
+    
+    # Add to class CarlaLaneFollowingStudentEnv
+    
+    # def _compute_reward(self):
+
+    #     total_reward = 0.0
+    #     reward_components = {}
+
+
+
+    #     # (A) Goal 
+    #     dist_goal = self.ego.get_location().distance(self.end_point.location)
         
-        reward_components["goal"] = r_goal
-        
-        total_reward = sum(reward_components.values())
 
-        return total_reward, reward_components
+    #     r_goal = 0.0
+    #     if dist_goal < 5.0:
+    #         r_goal = 200.0
+        
+    #     reward_components["goal"] = r_goal
+
+    #     total_reward = r_goal
+
+    #     collision     = self.collision_detected
+
+    #     if collision > 0:
+    #         total_reward -= 300
+    #         reward_components["collision"] = -300
+    #     else:
+    #         reward_components["collision"] = 0
+
+    #     ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
+    #     dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
+
+    #     total_reward += self.compute_goal_reward(ag[None], dg[None], reward_components)[0]
+    #     return total_reward, reward_components
 
     # --------------------------------------------------------------------------
     # Termination Conditions
@@ -1041,19 +871,33 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             return 0
         else:
             return self.get_location_distance(ego_location, self.waypoints[0])
-        
-    
+
+
     def _check_termination(self):
 
+        """
+        Returns
+        -------
+        terminated : bool    # True = task success/failure that should propagate gradients
+        truncated  : bool    # True = time-limit or external cut
+        info       : dict    # diagnostics
+        """
+        # --- gather episode facts ---------------------------------------------
         collision     = self.collision_detected
-        reached_goal  = self.ego.get_location().distance(self.end_point.location) < 2.0
+
+        ag = np.array([self.ego.get_location().x, self.ego.get_location().y], np.float32)
+        dg = np.array([self.end_point.location.x, self.end_point.location.y], np.float32)
+        reached_goal = float(np.linalg.norm(ag - dg) < self.goal_radius)
+        # reached_goal  = self.ego.get_location().distance(self.end_point.location) < 2.0
         time_exceeded = self._time_step >= self._max_time_step
 
         # low-speed: share the threshold with the reward code
         LOW_SPEED_KMH       = 1.0
         LOW_SPEED_TIMEOUT_S = 10.0
 
-        if self.speed_kmh < LOW_SPEED_KMH:
+        # if self.speed_kmh < LOW_SPEED_KMH:
+        spd = float(self.speed_kmh) if self.speed_kmh is not None else LOW_SPEED_KMH + 1.0
+        if spd < LOW_SPEED_KMH:
             if self.low_speed_start_time is None:
                 self.low_speed_start_time = time.time()
         else:
@@ -1085,31 +929,6 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             if dot_current > dot_goal:
                 past_goal = True
 
-        # Out of lane bounding box logic (if you want a simple check)
-        # E.g. if ego’s x is beyond left/right boundary
-        ego_loc = self.ego.get_transform().location
-            
-        out_of_lane = False
-
-        left_bound = -1000.0
-        right_bound = 1000.0
-
-        if EGO_SPAWN_POINT[self.spawn_index][0] == -16.890745162963867:
-            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 2.5
-            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 4.5
-        elif EGO_SPAWN_POINT[self.spawn_index][0] == -13.395880699157715:
-            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
-            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 3.5
-        elif EGO_SPAWN_POINT[self.spawn_index][0] == -9.890790939331055:
-            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
-            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 3.5
-        elif EGO_SPAWN_POINT[self.spawn_index][0] == -6.395920276641846:
-            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
-            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 2.5
-
-        if ego_loc.x < left_bound or ego_loc.x > right_bound:
-            out_of_lane = True
-
         # --- decide outcome ----------------------------------------------------
         info = {}
         terminated = False
@@ -1138,22 +957,7 @@ class CarlaOvertakeStudentTestEnv(gym.Env):
             info["time_exceeded"] = True
             info["elapsed_steps"] = self._time_step
 
-
-        elif out_of_lane:
-            terminated = True
-            info["out_of_lane"] = True
-
-        # if the distance between the two vehicles is too long, reset the scenario
-        ego_x, ego_y = self.get_vehicle_pos(self.ego)
-
-        if self.nonego is not None and self.nonego.is_alive:
-            pass
-        else:
-            self.reset_other_vehicles()
-
-        return terminated, info
-
-
+        return terminated , info
 
     # --------------------------------------------------------------------------
     # Cleanup
