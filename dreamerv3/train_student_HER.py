@@ -204,7 +204,7 @@ def main(argv=None):
     tp = teacher_agent.agent.task_behavior.ac.policy
     teacher_wm = teacher_agent.agent.wm
     agent = dreamerv3.agent_student(student_env.obs_space, student_env.act_space, teacher_wm, tp,  step, dreamerv3_config)  
-    replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "replay")
+    replay = embodied.replay.Uniform(dreamerv3_config.batch_length, dreamerv3_config.replay_size, logdir / "teacher_replay")
 
     def her_goal_reward(ag, dg, infos, goal_radius=2.0, r_goal=200.0, r_collision=150.0, r_lane_inv=20.0, lane_cost_alpha=0.0, lane_cost_cap=1.5, is_first=None):
         # ag, dg: shape [T, 2]

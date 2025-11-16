@@ -25,8 +25,8 @@ class StudentObs(gym.ObservationWrapper):
             "image": env.observation_space["image"],
             "collision": env.observation_space["collision"],
             "lane_invasion": env.observation_space["lane_invasion"],
-            "achieved_goal": env.observation_space["achieved_goal"],
-            "desired_goal": env.observation_space["desired_goal"],
+            # "achieved_goal": env.observation_space["achieved_goal"],
+            # "desired_goal": env.observation_space["desired_goal"],
         })
     def observation(self, obs):
         return {k: obs[k] for k in self.observation_space.spaces.keys()}
