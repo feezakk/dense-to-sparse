@@ -52,7 +52,26 @@ class HERWrapper:
 
             # 2) derive per-step arrays
             T = int(len(seq[self.reward_key]))
-            ag = np.asarray(seq[self.ag_key], np.float32)[:T]   # [T, 2]
+
+            # --- robust lookup for achieved_goal ---
+            ag_field = self.ag_key
+            ag_src = seq.get(ag_field, None)
+
+            if ag_src is None:
+                # Try un-prefixed / prefixed variants
+                if ag_field.startswith("info/"):
+                    alt = ag_field[len("info/"):]     # "achieved_goal"
+                else:
+                    alt = "info/" + ag_field          # "info/achieved_goal"
+                ag_src = seq.get(alt, None)
+
+            # If we still didn't find anything, skip HER augmentation for this sequence.
+            if ag_src is None:
+                # We already yielded the original seq above; just continue.
+                continue
+
+            ag = np.asarray(ag_src, np.float32)[:T]   # [T, 2]
+            # ag = np.asarray(seq[self.ag_key], np.float32)[:T]   # [T, 2]
             # coll = np.asarray(seq.get("collision",
             #                         seq.get("info/collision", np.zeros(T))),
             #                 np.float32)[:T]
@@ -129,12 +148,44 @@ class HERWrapper:
                     raise ValueError(f"Unknown strategy {self.strategy}")
 
                 # 4) write only changed fields
-                seq2 = dict(seq)
-                seq2[self.dg_key] = dg.astype(np.float32)
+                # seq2 = dict(seq)
+                # seq2[self.dg_key] = dg.astype(np.float32)
 
+                # # --- robust lookup for desired_goal ---
+                # dg_field = self.dg_key
+                # dg_src = seq.get(dg_field, None)
+
+                # if dg_src is None:
+                #     if dg_field.startswith("info/"):
+                #         alt = dg_field[len("info/"):]     # "desired_goal"
+                #     else:
+                #         alt = "info/" + dg_field          # "info/desired_goal"
+                #     dg_src = seq.get(alt, None)
+
+                # # If still missing, fall back to using the same points as achieved_goal
+                # if dg_src is None:
+                #     dg_src = ag_src
+
+                # dg = np.asarray(dg_src, np.float32)[:T]
+
+
+                # seq2[self.reward_key] = np.asarray(
+                #     self.reward_fn(ag, dg, infos, is_first=np.asarray(seq.get("is_first", np.zeros(T)), bool)[:T]), np.float32
+                # )[:T]
+
+                # 4) write only changed fields
+                seq2 = dict(seq)
+
+                # dg here is the HER-sampled desired goal from above
+                dg_her = dg.astype(np.float32)        # [T, 2]
+                seq2[self.dg_key] = dg_her
+
+                # use the same is_first you computed earlier
                 seq2[self.reward_key] = np.asarray(
-                    self.reward_fn(ag, dg, infos, is_first=np.asarray(seq.get("is_first", np.zeros(T)), bool)[:T]), np.float32
+                    self.reward_fn(ag, dg_her, infos, is_first=is_first),
+                    np.float32
                 )[:T]
+
 
 
                 # If learner consumes these, stop bootstrapping after success.
