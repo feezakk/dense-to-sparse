@@ -152,8 +152,8 @@ def train(agent, env, eval_env, replay, eval_replay, logger, args):
             outs, state[0], mets = agent.train(batch[0], state[0])
             metrics.add(mets, prefix="train")
 
-            if getattr(replay, "update_visit_count", False):
-                replay.update_visit_count(jax.device_get(batch[0]["env_step"]))
+            # if getattr(replay, "update_visit_count", False):
+            #     replay.update_visit_count(jax.device_get(batch[0]["env_step"]))
 
             if "key" in outs:
                 replay.prioritize(outs["key"], outs["env_step"], outs["model_loss"], outs["td_error"])
