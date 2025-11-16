@@ -9,6 +9,8 @@ import dreamerv3
 
 import csv, atexit
 
+import numpy as np
+
 warnings.filterwarnings("ignore", ".*truncated to dtype int32.*")
 
 
@@ -92,7 +94,7 @@ def main(argv=None):
         r = (d < goal_radius).astype(np.float32) * r_goal  # [T]
 
         if is_first is None:
-            is_first = np.zeros_like(T, dtype=bool)
+            is_first = np.zeros(T, dtype=bool)
             is_first[0] = True
 
         #Rising edge of "near", reset at episode starts.
@@ -131,8 +133,8 @@ def main(argv=None):
                                         k=4,
                                         strategy="future",
                                         future_horizon=None,
-                                        ag_key="achieved_goal",
-                                        dg_key="desired_goal",
+                                        ag_key="info/achieved_goal",
+                                        dg_key="info/desired_goal",
                                         reward_key="reward",
                                         strict_future=True
                                         )

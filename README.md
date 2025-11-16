@@ -7,9 +7,7 @@
    Train the DreamerV3 teacher model for the overtaking task:
 
    ```bash
-   bash train_dm3_teacher.sh 3000 0 \
-     --task carla_overtake \
-     --dreamerv3.logdir ./logdir/carla_overtake_teacher/
+   bash train_dm3_teacher.sh 3000 0 --task carla_overtake --dreamerv3.logdir ./logdir/carla_overtake_teacher/
    ```
 
 ### 2. Train Teacher Model - Lane Following
@@ -17,9 +15,43 @@
    Train the DreamerV3 teacher model for the lane following task:
 
    ```bash
-   bash train_dm3_teacher.sh 3000 0 \
-     --task carla_lane_following \
-     --dreamerv3.logdir ./logdir/carla_lane_following_teacher/
+   bash train_dm3_teacher.sh 3000 0 --task carla_lane_following --dreamerv3.logdir ./logdir/carla_lane_following_teacher/
+   ```
+
+## Baseline Hindesight Experience Replay (HER) without distillation on CARLA Overtaking and Lane Following Tasks
+
+### 1. Train Model - Lane Following with HER without distillation
+
+   Run the DreamerV3 with HER without distillation for lane following task:
+
+   ```bash
+   bash train_dm3_HER.sh 3000 0 --task carla_lane_following_student --dreamerv3.logdir ./logdir/carla_lane_following_HER_without_distillation/
+   ```
+
+### 2. Train Model - Overtaking without HER without distillation
+
+   Run the DreamerV3 with HER without distillation for overtaking task:
+
+   ```bash
+   bash train_dm3_HER.sh 3000 0 --task carla_overtake_student --dreamerv3.logdir ./logdir/carla_overtake_HER_without_distillation/
+   ```
+
+## Baseline Hindesight Experience Replay (HER) with distillation on CARLA Overtaking and Lane Following Tasks
+
+### 1. Train Model - Lane Following with HER with distillation
+
+   Run the DreamerV3 with HER with distillation for lane following task:
+
+   ```bash
+   bash train_dm3_student_HER.sh 3000 0 --task carla_lane_following_student --dreamerv3.logdir ./logdir/carla_lane_following_HER_with_distillation/
+   ```
+
+### 2. Train Model - Overtaking with HER without distillation
+
+   Run the DreamerV3 with HER with distillation for overtaking task:
+
+   ```bash
+   bash train_dm3_student_HER.sh 3000 0 --task carla_overtake_student --dreamerv3.logdir ./logdir/carla_overtake_HER_with_distillation/
    ```
 
 ## Distillation on CARLA Overtaking and Lane Following Tasks 

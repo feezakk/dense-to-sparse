@@ -7,6 +7,7 @@ import ruamel.yaml as yaml
 
 import car_dreamer
 import dreamerv3
+import csv, atexit
 
 warnings.filterwarnings("ignore", ".*truncated to dtype int32.*")
 
@@ -33,7 +34,6 @@ def wrap_env(env, config):
             env = embodied.wrappers.ClipAction(env, name)
     return env
 
-
 def eval_only(agent, env, logger, args):
     print("Start evaluation.")
     print("args:", args)
@@ -51,6 +51,50 @@ def eval_only(agent, env, logger, args):
     timer.wrap("logger", logger, ["write"])
 
     nonzeros = set()
+
+    # ---------- CSV writers (NEW) ----------
+    def _make_writer(path):
+        path = embodied.Path(path)
+        exists = path.exists()
+        f = open(str(path), "a", newline="")
+        fieldnames = [
+            "episode_index","env_step","length","return",
+            "success","collision","time_exceeded","not_moving","past_goal"
+        ]
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            w.writeheader(); f.flush()
+        return f, w
+
+    train_csv_f, train_csv_w = _make_writer(logdir / "train_success.csv")
+    eval_csv_f,  eval_csv_w  = _make_writer(logdir / "eval_success.csv")
+    atexit.register(lambda: (train_csv_f.close(), eval_csv_f.close()))
+    train_ep_idx = {"v": 0}
+    eval_ep_idx  = {"v": 0}
+
+    def _csv_log(ep, ep_info, is_eval=False):
+        # Episode stats
+        length = int(len(ep["reward"]) - 1)
+        ret = float(ep["reward"].astype(np.float64).sum())
+        def _any(k):  # handles missing keys
+            v = ep_info.get(k, [])
+            return bool(np.any(np.array(v)))
+        row = {
+            "episode_index": (eval_ep_idx["v"] if is_eval else train_ep_idx["v"]),
+            "env_step": int(logger.step),
+            "length": length,
+            "return": ret,
+            "success": int(_any("goal_reached")),
+            "collision": int(_any("collision")),
+            "time_exceeded": int(_any("time_exceeded")),
+            "not_moving": int(_any("not_moving")),
+            "past_goal": int(_any("past_goal")),
+        }
+        w, f = (eval_csv_w, eval_csv_f) if is_eval else (train_csv_w, train_csv_f)
+        w.writerow(row); f.flush()
+        if is_eval: eval_ep_idx["v"] += 1
+        else:       train_ep_idx["v"] += 1
+    # ---------------------------------------
 
     def per_episode(ep, ep_info):
         length = len(ep["reward"]) - 1
@@ -90,6 +134,7 @@ def eval_only(agent, env, logger, args):
     driver = embodied.DriverTeacher(env)
     driver.on_episode(lambda ep, ep_info, worker: per_episode(ep, ep_info))
     driver.on_step(lambda tran, info, _: per_step(step))
+    driver.on_episode(lambda ep, ep_info, worker: _csv_log(ep, ep_info, is_eval=True))
 
     checkpoint = embodied.Checkpoint()
     checkpoint.agent = agent

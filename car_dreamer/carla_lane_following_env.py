@@ -459,8 +459,13 @@ class CarlaLaneFollowingEnv(gym.Env):
         if done == True:
             print("terminal_info", terminal_info)
 
+        ag = np.array([self.ego.get_location().x,
+                       self.ego.get_location().y], np.float32)
+        dg = np.array([self.end_point.location.x,
+                       self.end_point.location.y], np.float32)
 
-        info = {**info_dict, **terminal_info}
+
+        info = {**info_dict, **terminal_info, "achieved_goal": ag, "desired_goal": dg}
 
         # store the transition in the buffer
         # transition = {
