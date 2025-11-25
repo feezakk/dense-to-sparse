@@ -32,6 +32,7 @@ def train(agent, env, eval_env, replay, eval_replay, logger, args):
     nonzeros = set()
 
     # ---------- CSV writers (NEW) ----------
+        # ---------- CSV writers (NEW) ----------
     def _make_writer(path):
         path = embodied.Path(path)
         exists = path.exists()
@@ -45,21 +46,66 @@ def train(agent, env, eval_env, replay, eval_replay, logger, args):
             w.writeheader(); f.flush()
         return f, w
 
+    def _make_step_writer(path):
+        path = embodied.Path(path)
+        exists = path.exists()
+        f = open(str(path), "a", newline="")
+        fieldnames = [
+            "episode_index",
+            "t",               # time index within episode
+            "env_step",        # global/env step if available
+            "reward",
+            "collision_step",
+            "lane_invasion_step",
+            "goal_reached",
+            "time_exceeded",
+            "not_moving",
+            "past_goal",
+            "off_center_m",
+        ]
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            w.writeheader(); f.flush()
+        return f, w
+
     train_csv_f, train_csv_w = _make_writer(logdir / "train_success.csv")
     eval_csv_f,  eval_csv_w  = _make_writer(logdir / "eval_success.csv")
-    atexit.register(lambda: (train_csv_f.close(), eval_csv_f.close()))
+
+    train_step_f, train_step_w = _make_step_writer(logdir / "train_steps.csv")
+    eval_step_f,  eval_step_w  = _make_step_writer(logdir / "eval_steps.csv")
+
+    atexit.register(
+        lambda: (
+            train_csv_f.close(), eval_csv_f.close(),
+            train_step_f.close(), eval_step_f.close()
+        )
+    )
     train_ep_idx = {"v": 0}
     eval_ep_idx  = {"v": 0}
 
+
     def _csv_log(ep, ep_info, is_eval=False):
         # Episode stats
-        length = int(len(ep["reward"]) - 1)
+        length = int(len(ep["reward"]) - 1)  # you already do this
         ret = float(ep["reward"].astype(np.float64).sum())
+
         def _any(k):  # handles missing keys
             v = ep_info.get(k, [])
             return bool(np.any(np.array(v)))
-        row = {
-            "episode_index": (eval_ep_idx["v"] if is_eval else train_ep_idx["v"]),
+
+        # Choose episode index and writers
+        if is_eval:
+            ep_idx = eval_ep_idx["v"]
+            w_ep, f_ep = eval_csv_w, eval_csv_f
+            w_step, f_step = eval_step_w, eval_step_f
+        else:
+            ep_idx = train_ep_idx["v"]
+            w_ep, f_ep = train_csv_w, train_csv_f
+            w_step, f_step = train_step_w, train_step_f
+
+        # --------- 1) Episode-level row (unchanged logic) ----------
+        row_ep = {
+            "episode_index": ep_idx,
             "env_step": int(logger.step),
             "length": length,
             "return": ret,
@@ -69,10 +115,69 @@ def train(agent, env, eval_env, replay, eval_replay, logger, args):
             "not_moving": int(_any("not_moving")),
             "past_goal": int(_any("past_goal")),
         }
-        w, f = (eval_csv_w, eval_csv_f) if is_eval else (train_csv_w, train_csv_f)
-        w.writerow(row); f.flush()
-        if is_eval: eval_ep_idx["v"] += 1
-        else:       train_ep_idx["v"] += 1
+        w_ep.writerow(row_ep)
+        f_ep.flush()
+
+        # --------- 2) Step-level rows (NEW) ----------
+        # Convert to arrays with safe defaults
+        rewards = np.asarray(ep["reward"][:length], np.float32)
+
+        def _step_arr(name, default=0):
+            v = ep_info.get(name, None)
+            if v is None:
+                return np.full((length,), default, np.int32)
+            arr = np.asarray(v)
+            # make sure we have length entries
+            if arr.shape[0] >= length:
+                arr = arr[:length]
+            else:
+                pad = np.full((length - arr.shape[0],), default, arr.dtype)
+                arr = np.concatenate([arr, pad], axis=0)
+            return arr
+
+        collision_step    = _step_arr("collision_step", 0)
+        lane_inv_step     = _step_arr("lane_invasion_step", 0)
+        goal_reached_step = _step_arr("goal_reached", 0)
+        time_exceeded     = _step_arr("time_exceeded", 0)
+        not_moving        = _step_arr("not_moving", 0)
+        past_goal         = _step_arr("past_goal", 0)
+        off_center        = ep_info.get("off_center_m", None)
+        if off_center is None:
+            off_center = np.zeros((length,), np.float32)
+        else:
+            off_center = np.asarray(off_center[:length], np.float32)
+
+        # env_step per transition if available
+        if "env_step" in ep:
+            env_steps = np.asarray(ep["env_step"][:length], np.int64)
+        else:
+            # fallback: use logger.step as coarse reference, or leave as t
+            env_steps = np.arange(length, dtype=np.int64)
+
+        for t in range(length):
+            row_step = {
+                "episode_index": ep_idx,
+                "t": int(t),
+                "env_step": int(env_steps[t]),
+                "reward": float(rewards[t]),
+                "collision_step": int(collision_step[t]),
+                "lane_invasion_step": int(lane_inv_step[t]),
+                "goal_reached": int(goal_reached_step[t]),
+                "time_exceeded": int(time_exceeded[t]),
+                "not_moving": int(not_moving[t]),
+                "past_goal": int(past_goal[t]),
+                "off_center_m": float(off_center[t]),
+            }
+            w_step.writerow(row_step)
+
+        f_step.flush()
+
+        # bump episode index after logging
+        if is_eval:
+            eval_ep_idx["v"] += 1
+        else:
+            train_ep_idx["v"] += 1
+
     # ---------------------------------------
 
     def per_episode(ep, ep_info):

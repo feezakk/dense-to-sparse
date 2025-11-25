@@ -224,6 +224,17 @@ class CarlaOvertakeEnv(gym.Env):
         self._collision_step = False
         self._lane_invasion_step = False
 
+        # --- NEW: overtaking evaluation bookkeeping ---
+        self.prev_ego_location = None
+        self.travel_distance = 0.0           # accumulated [m]
+        self.min_ego_lead_dist = float("inf")
+
+        self.exceed_event_step = False       # per-step flags
+        self.return_event_step = False
+        self.overtake_event_step = False
+
+        self.returned = False                # episode-level flag (has ego returned to lane?)
+
     def _hard_world_cleanup(self):
         actors = self.world.get_actors()
         victims = []
@@ -531,6 +542,19 @@ class CarlaOvertakeEnv(gym.Env):
         self._collision_step = False
         self._lane_invasion_step = False
 
+        # --- NEW: reset eval statistics ---
+        self.prev_ego_location = self.ego.get_location()
+        self.travel_distance = 0.0
+        self.min_ego_lead_dist = float("inf")
+
+        self.exceeding = False
+        self.overtake = False
+        self.returned = False
+
+        self.exceed_event_step = False
+        self.return_event_step = False
+        self.overtake_event_step = False
+
         
 
         print("Environment reset")
@@ -615,6 +639,31 @@ class CarlaOvertakeEnv(gym.Env):
             self._destroy_batch(self.world, getattr(self, "other_vehicles", []))
             self.other_vehicles = []
             self.reset_other_vehicles()
+
+                # --- NEW: per-step distances for evaluation ---
+
+        # ego travel distance since last step
+        cur_loc = self.ego.get_location()
+        if self.prev_ego_location is None:
+            self.prev_ego_location = cur_loc
+
+        dx = cur_loc.x - self.prev_ego_location.x
+        dy = cur_loc.y - self.prev_ego_location.y
+        step_dist = math.sqrt(dx * dx + dy * dy)   # [m]
+
+        self.travel_distance += step_dist
+        self.prev_ego_location = cur_loc
+
+        # ego–lead distance
+        if self.nonego is not None and self.nonego.is_alive:
+            lead_loc = self.nonego.get_location()
+            dx2 = cur_loc.x - lead_loc.x
+            dy2 = cur_loc.y - lead_loc.y
+            ego_lead_dist = math.sqrt(dx2 * dx2 + dy2 * dy2)
+            self.min_ego_lead_dist = min(self.min_ego_lead_dist, ego_lead_dist)
+        else:
+            ego_lead_dist = float("nan")
+
         
         # 4. Update waypoint
 
@@ -647,6 +696,21 @@ class CarlaOvertakeEnv(gym.Env):
         self._lane_invasion_step = False
 
         info_dict["off_center_m"] = abs(self.get_signed_lane_offset())
+
+        # --- NEW: add evaluation signals to info_dict ---
+        info_dict["step_distance"] = step_dist         # [m] this step
+        info_dict["travel_distance"] = self.travel_distance  # cumulative [m]
+
+        info_dict["ego_lead_dist"] = ego_lead_dist     # [m] this step (nan if no lead)
+
+        info_dict["exceed"] = int(self.exceed_event_step)
+        info_dict["returned"] = int(self.return_event_step)
+        info_dict["overtake"] = int(self.overtake_event_step)
+
+        # reset step-event flags (episode-level flags remain)
+        self.exceed_event_step = False
+        self.return_event_step = False
+        self.overtake_event_step = False
 
 
         # 4. Check termination
@@ -1028,6 +1092,10 @@ class CarlaOvertakeEnv(gym.Env):
 
         reward_components = {}
 
+        self.exceed_event_step = False
+        self.return_event_step = False
+        self.overtake_event_step = False
+
         # A. Reward for reaching waypoints
         r_waypoints = 0.0
 
@@ -1139,8 +1207,15 @@ class CarlaOvertakeEnv(gym.Env):
         if ego_y < self.nonego.get_transform().location.y and not self.exceeding:
             r_exceeding = reward_scales["exceeding"]
             self.exceeding = True
+            self.exceed_event_step = True     # <-- NEW
 
         reward_components["exceeding"] = r_exceeding
+
+        # K. Return-to-lane event (no reward change, just logging)
+        returned_to_lane = abs(ego_x - nonego_spawn_x) < TERMINAL["lane_width"] / 5.0
+        if self.exceeding and returned_to_lane and not self.returned:
+            self.returned = True
+            self.return_event_step = True     # <-- NEW (no reward entry)
 
         # K. Overtake reward (exceed and come back to the same lane)
         r_overtake = 0.0
@@ -1151,6 +1226,7 @@ class CarlaOvertakeEnv(gym.Env):
         ):
             r_overtake = reward_scales["overtake"]
             self.overtake = True
+            self.overtake_event_step = True
 
         reward_components["overtake"] = r_overtake
 

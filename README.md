@@ -9,7 +9,7 @@
    Train the DreamerV3 teacher model for the overtaking task:
 
    ```bash
-   bash train_dm3_teacher.sh 3000 0 --task carla_overtake --dreamerv3.logdir ./logdir/carla_overtake_teacher/
+   bash train_dm3_teacher.sh 3000 0 --task carla_overtake --dreamerv3.logdir ./logdir/carla_overtake_teacher/ --dreamerv3.run.steps=100000
    ```
 
 ### 2. Train Teacher Model - Lane Following
@@ -17,7 +17,7 @@
    Train the DreamerV3 teacher model for the lane following task:
 
    ```bash
-   bash train_dm3_teacher.sh 3000 0 --task carla_lane_following --dreamerv3.logdir ./logdir/carla_lane_following_teacher/
+   bash train_dm3_teacher.sh 3000 0 --task carla_lane_following --dreamerv3.logdir ./logdir/carla_lane_following_teacher/ --dreamerv3.run.steps=100000
    ```
 
 ## 2. Baseline Hindesight Experience Replay (HER) without distillation on CARLA Overtaking and Lane Following Tasks
@@ -27,7 +27,7 @@
    Run the DreamerV3 with HER without distillation for lane following task:
 
    ```bash
-   bash train_dm3_HER.sh 3000 0 --task carla_lane_following_student --dreamerv3.logdir ./logdir/carla_lane_following_HER_without_distillation/
+   bash train_dm3_HER.sh 3000 0 --task carla_lane_following_student --dreamerv3.logdir ./logdir/carla_lane_following_HER_without_distillation/ --dreamerv3.run.steps=100000
    ```
 
 ### 2. Train Model - Overtaking without HER without distillation
@@ -35,7 +35,7 @@
    Run the DreamerV3 with HER without distillation for overtaking task:
 
    ```bash
-   bash train_dm3_HER.sh 3000 0 --task carla_overtake_student --dreamerv3.logdir ./logdir/carla_overtake_HER_without_distillation/
+   bash train_dm3_HER.sh 3000 0 --task carla_overtake_student --dreamerv3.logdir ./logdir/carla_overtake_HER_without_distillation/ --dreamerv3.run.steps=100000
    ```
 
 ## 3. Baseline Hindesight Experience Replay (HER) with distillation on CARLA Overtaking and Lane Following Tasks
@@ -45,7 +45,7 @@
    Run the DreamerV3 with HER with distillation for lane following task:
 
    ```bash
-   bash train_dm3_student_HER.sh 3000 0 --task carla_lane_following_student --dreamerv3.logdir ./logdir/carla_lane_following_HER_with_distillation/
+   bash train_dm3_student_HER.sh 3000 0 --task carla_lane_following_student --dreamerv3.logdir ./logdir/carla_lane_following_HER_with_distillation/ --dreamerv3.run.steps=100000
    ```
 
 ### 2. Train Model - Overtaking with HER without distillation
@@ -53,31 +53,41 @@
    Run the DreamerV3 with HER with distillation for overtaking task:
 
    ```bash
-   bash train_dm3_student_HER.sh 3000 0 --task carla_overtake_student --dreamerv3.logdir ./logdir/carla_overtake_HER_with_distillation/
+   bash train_dm3_student_HER.sh 3000 0 --task carla_overtake_student --dreamerv3.logdir ./logdir/carla_overtake_HER_with_distillation/ --dreamerv3.run.steps=100000
    ```
 
 ## 4. Baseline Distillation on CARLA Overtaking and Lane Following Tasks 
 
 ### 1. Train Student Model - Lane Following with distillation
 
-   Run the DreamerV3 student without bisimulation:
+   Run the DreamerV3 student for lane following without bisimulation:
 
    ```bash
    bash train_dm3_student_bisim.sh 3000 0 \
      --task carla_lane_following_student \
      --dreamerv3.logdir ./logdir/carla_lane_following_student/ \
-     --dreamerv3.enable_bisim=False
+     --dreamerv3.enable_bisim=False \
+     --dreamerv3.loss_scales.posterior_deter_kl=1.0 \
+     --dreamerv3.loss_scales.posterior_stoch_kl=1.0 \
+     --dreamerv3.loss_scales.prior_deter_kl=1.0 \
+     --dreamerv3.loss_scales.prior_stoch_kl=1.0 \
+     --dreamerv3.run.steps=100000
    ```
 
 ### 2. Train Student Model - Overtaking with distillation
 
-   Run the DreamerV3 student without bisimulation:
+   Run the DreamerV3 student for overtaking without bisimulation:
 
    ```bash
    bash train_dm3_student_bisim.sh 3000 0 \
      --task carla_overtake_student \
      --dreamerv3.logdir ./logdir/carla_overtake_student/ \
-     --dreamerv3.enable_bisim=False
+     --dreamerv3.enable_bisim=False \
+     --dreamerv3.loss_scales.posterior_deter_kl=1.0 \
+     --dreamerv3.loss_scales.posterior_stoch_kl=1.0 \
+     --dreamerv3.loss_scales.prior_deter_kl=1.0 \
+     --dreamerv3.loss_scales.prior_stoch_kl=1.0 \
+     --dreamerv3.run.steps=100000
    ```
 
 ### 3. Run without bisim with loss scaling - Lane Following
@@ -104,7 +114,8 @@
    ```bash
    bash train_dm3_teacher.sh 3000 0 \
      --task carla_overtake_student \
-     --dreamerv3.logdir ./logdir/carla_overtaking_student_sparse/
+     --dreamerv3.logdir ./logdir/carla_overtaking_student_sparse/ \
+     --dreamerv3.run.steps=100000
    ```
 
 ### 2. Train  Student Model on Sparse Rewards - Lane Following
@@ -114,7 +125,8 @@
    ```bash
    bash train_dm3_teacher.sh 3000 0 \
      --task carla_lane_following_student \
-     --dreamerv3.logdir ./logdir/carla_lane_following_student_sparse/
+     --dreamerv3.logdir ./logdir/carla_lane_following_student_sparse/\
+     --dreamerv3.run.steps=100000
    ```
 
 # 2. Evaluation Setups for CARLA Overtaking and Lane Following Tasks
@@ -126,7 +138,7 @@
    Evaluate the DreamerV3 teacher model for the overtaking task:
 
    ```bash
-   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake/checkpoint.ckpt --task carla_overtake --dreamerv3.logdir ./logdir/eval_overtake_teacher_seen
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_teacher/checkpoint.ckpt --task carla_overtake --dreamerv3.logdir ./eval_logdir/eval_overtake_teacher_seen
    ```
 
 ### Evaluate Teacher - Overtaking Unseen
@@ -134,7 +146,7 @@
    Evaluate the DreamerV3 teacher model for the overtaking task:
 
    ```bash
-   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake/checkpoint.ckpt --task carla_overtake_test --dreamerv3.logdir ./logdir/eval_overtake_teacher_unseen
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_teacher/checkpoint.ckpt --task carla_overtake_test --dreamerv3.logdir ./eval_logdir/eval_overtake_teacher_unseen
    ```
 
 ### Evaluate Student - Overtaking Seen
@@ -142,7 +154,7 @@
    Evaluate the DreamerV3 teacher model for the overtaking task:
 
    ```bash
-   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_student/checkpoint.ckpt --task carla_overtake_student --dreamerv3.logdir ./logdir/eval_overtake_student_seen
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_student/checkpoint.ckpt --task carla_overtake_student --dreamerv3.logdir ./eval_logdir/eval_overtake_student_seen
    ```
 
 ### Evaluate Student - Overtaking Unseen
@@ -150,5 +162,5 @@
    Evaluate the DreamerV3 teacher model for the overtaking task:
 
    ```bash
-   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_student/checkpoint.ckpt --task carla_overtake_student_test --dreamerv3.logdir ./logdir/eval_overtake_student_unseen
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_student/checkpoint.ckpt --task carla_overtake_student_test --dreamerv3.logdir ./eval_logdir/eval_overtake_student_unseen
    ```

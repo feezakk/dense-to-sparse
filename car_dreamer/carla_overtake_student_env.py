@@ -224,6 +224,9 @@ class CarlaOvertakeStudentEnv(gym.Env):
         self._collision_step = False
         self._lane_invasion_step = False
 
+        self.exceeded = False          # has ego passed the lead car?
+        self.returned = False          # has ego come back to original lane?
+
     def _hard_world_cleanup(self):
         actors = self.world.get_actors()
         victims = []
@@ -531,7 +534,8 @@ class CarlaOvertakeStudentEnv(gym.Env):
         self._collision_step = False
         self._lane_invasion_step = False
 
-        
+        self.exceeded = False
+        self.returned = False        
 
         print("Environment reset")
 
@@ -615,6 +619,21 @@ class CarlaOvertakeStudentEnv(gym.Env):
             self._destroy_batch(self.world, getattr(self, "other_vehicles", []))
             self.other_vehicles = []
             self.reset_other_vehicles()
+
+        # --- sparse-success tracking (NEW) ---
+        ego_x, ego_y = self.get_vehicle_pos(self.ego)
+        lead_x, lead_y = self.get_vehicle_pos(self.nonego)
+
+        # “exceeded” = ego y passes beyond lead y (you already use this in teacher env)
+        if not self.exceeded and ego_y < lead_y:
+            self.exceeded = True
+
+        # “returned” = back in original lane center band
+        lane_center_x = EGO_SPAWN_POINT[self.spawn_index][0]
+        in_original_lane = abs(ego_x - lane_center_x) < TERMINAL["lane_width"] / 5.0
+        if self.exceeded and in_original_lane:
+            self.returned = True
+        # --------------------------------------
         
         # 4. Update waypoint
 
@@ -1013,38 +1032,92 @@ class CarlaOvertakeStudentEnv(gym.Env):
     
         return angle_offset
     
-
     def _compute_reward(self):
-
+        """
+        Sparse student reward:
+        r = 1 only if the episode has logically succeeded:
+          - ego has passed the lead car at some point (self.exceeded),
+          - ego has returned to the original lane (self.returned),
+          - ego reaches the terminal goal region (dist_goal < 2m),
+          - no collision and not out_of_lane.
+        r = 0 otherwise (including past_goal overshoot).
+        """
         reward_components = {}
 
+        # Geometry: distance to goal
         dist_goal = self.ego.get_location().distance(self.end_point.location)
+        reached_goal = dist_goal < 2.0
 
-        if self.spawn_index is not None:
-            # 2D version for clarity (discard z if you like)
-            v_goal = np.array([
-                self.end_point.location.x - EGO_SPAWN_POINT[self.spawn_index][0],
-                self.end_point.location.y - EGO_SPAWN_POINT[self.spawn_index][1]
-            ])
-            v_current = np.array([
-                self.ego.get_location().x - EGO_SPAWN_POINT[self.spawn_index][0],
-                self.ego.get_location().y - EGO_SPAWN_POINT[self.spawn_index][1]
-            ])
-            dot_goal = np.dot(v_goal, v_goal)          # ||SE||^2
-            dot_current = np.dot(v_goal, v_current)    # SE · SC
+        # Recompute simple out_of_lane test (same as in _check_termination)
+        ego_loc = self.ego.get_transform().location
+        spawn_x = EGO_SPAWN_POINT[self.spawn_index][0]
+        if spawn_x == -16.890745162963867:
+            left_bound  = spawn_x - 2.5
+            right_bound = spawn_x + 4.5
+        elif spawn_x == -13.395880699157715:
+            left_bound  = spawn_x - 3.5
+            right_bound = spawn_x + 3.5
+        elif spawn_x == -9.890790939331055:
+            left_bound  = spawn_x - 3.5
+            right_bound = spawn_x + 3.5
+        elif spawn_x == -6.395920276641846:
+            left_bound  = spawn_x - 3.5
+            right_bound = spawn_x + 2.5
+        else:
+            left_bound, right_bound = spawn_x - 4.0, spawn_x + 4.0
 
-        if dot_current > dot_goal:
-                r_goal = 200.0
-        elif dist_goal < 2.0:
-            r_goal = 200.0
-        else: 
-            r_goal = 0.0
+        out_of_lane = ego_loc.x < left_bound or ego_loc.x > right_bound
+
+        # Collision flag for this state
+        collision = self.collision_detected
+
+        # Sparse success condition:
+        #   pass + return + reach goal, before overshooting, without collision or out-of-lane
+        success = (
+            reached_goal
+            and self.exceeded
+            and self.returned
+            and not collision
+            and not out_of_lane
+        )
+
+        r = 200.0 if success else 0.0
+        reward_components["success"] = float(success)
+
+        return r, reward_components
+    
+
+    # def _compute_reward(self):
+
+    #     reward_components = {}
+
+    #     dist_goal = self.ego.get_location().distance(self.end_point.location)
+
+    #     if self.spawn_index is not None:
+    #         # 2D version for clarity (discard z if you like)
+    #         v_goal = np.array([
+    #             self.end_point.location.x - EGO_SPAWN_POINT[self.spawn_index][0],
+    #             self.end_point.location.y - EGO_SPAWN_POINT[self.spawn_index][1]
+    #         ])
+    #         v_current = np.array([
+    #             self.ego.get_location().x - EGO_SPAWN_POINT[self.spawn_index][0],
+    #             self.ego.get_location().y - EGO_SPAWN_POINT[self.spawn_index][1]
+    #         ])
+    #         dot_goal = np.dot(v_goal, v_goal)          # ||SE||^2
+    #         dot_current = np.dot(v_goal, v_current)    # SE · SC
+
+    #     if dot_current > dot_goal:
+    #             r_goal = 200.0
+    #     elif dist_goal < 2.0:
+    #         r_goal = 200.0
+    #     else: 
+    #         r_goal = 0.0
         
-        reward_components["goal"] = r_goal
+    #     reward_components["goal"] = r_goal
         
-        total_reward = sum(reward_components.values())
+    #     total_reward = sum(reward_components.values())
 
-        return total_reward, reward_components
+    #     return total_reward, reward_components
 
     # --------------------------------------------------------------------------
     # Termination Conditions

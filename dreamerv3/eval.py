@@ -59,7 +59,12 @@ def eval_only(agent, env, logger, args):
         f = open(str(path), "a", newline="")
         fieldnames = [
             "episode_index","env_step","length","return",
-            "success","collision","time_exceeded","not_moving","past_goal"
+            "success","collision","time_exceeded","not_moving","past_goal",
+            # --- NEW metrics ---
+            "distance_m", "distance_km",
+            "collisions_per_km", "lane_invasions", "lane_invasions_per_km",
+            "exceed", "returned", "overtaken",
+            "min_ego_lead_dist", "mean_off_center_m",
         ]
         w = csv.DictWriter(f, fieldnames=fieldnames)
         if not exists:
@@ -79,6 +84,36 @@ def eval_only(agent, env, logger, args):
         def _any(k):  # handles missing keys
             v = ep_info.get(k, [])
             return bool(np.any(np.array(v)))
+        
+
+        # --- NEW: helper arrays with safe defaults ---
+        step_dist_arr = np.array(ep_info.get("step_distance", [0.0]), dtype=np.float64)
+        off_center_arr = np.array(ep_info.get("off_center_m", [0.0]), dtype=np.float64)
+        lane_inv_arr = np.array(ep_info.get("lane_invasion_step", [0]), dtype=np.int32)
+        ego_lead_arr = np.array(ep_info.get("ego_lead_dist", [np.inf]), dtype=np.float64)
+
+        distance_m = float(step_dist_arr.sum())
+        distance_km = distance_m / 1000.0 if distance_m > 0 else 0.0
+        lane_invasions = int(lane_inv_arr.sum())
+        mean_off_center_m = float(off_center_arr.mean()) if off_center_arr.size else 0.0
+        min_ego_lead_dist = float(ego_lead_arr.min()) if ego_lead_arr.size else np.inf
+
+        # episode-level flags
+        success = int(_any("goal_reached"))          # or "overtake" if you prefer
+        collision = int(_any("collision"))
+        time_exceeded = int(_any("time_exceeded"))
+        not_moving = int(_any("not_moving"))
+        past_goal = int(_any("past_goal"))
+
+        exceed = int(_any("exceed"))
+        returned = int(_any("returned"))
+        overtaken = int(_any("overtake"))
+
+        eps = 1e-6
+        collisions_per_km = collision / max(distance_km, eps)
+        lane_inv_per_km = lane_invasions / max(distance_km, eps)
+
+
         row = {
             "episode_index": (eval_ep_idx["v"] if is_eval else train_ep_idx["v"]),
             "env_step": int(logger.step),
@@ -89,6 +124,17 @@ def eval_only(agent, env, logger, args):
             "time_exceeded": int(_any("time_exceeded")),
             "not_moving": int(_any("not_moving")),
             "past_goal": int(_any("past_goal")),
+            # --- NEW metrics ---
+            "distance_m": distance_m,
+            "distance_km": distance_km,
+            "collisions_per_km": collisions_per_km,
+            "lane_invasions": lane_invasions,
+            "lane_invasions_per_km": lane_inv_per_km,
+            "exceed": exceed,
+            "returned": returned,
+            "overtaken": overtaken,
+            "min_ego_lead_dist": min_ego_lead_dist,
+            "mean_off_center_m": mean_off_center_m,
         }
         w, f = (eval_csv_w, eval_csv_f) if is_eval else (train_csv_w, train_csv_f)
         w.writerow(row); f.flush()
