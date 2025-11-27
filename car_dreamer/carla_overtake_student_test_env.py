@@ -84,7 +84,7 @@ def distance_2d(loc1, loc2):
 # --------------------------------------------------------------------------------
 # Example single-file environment for overtaking
 # --------------------------------------------------------------------------------
-class CarlaOvertakeStudentEnv(gym.Env):
+class CarlaOvertakeStudentTestEnv(gym.Env):
     def __init__(self, config):
         super().__init__()
 
@@ -218,8 +218,16 @@ class CarlaOvertakeStudentEnv(gym.Env):
         self._collision_step = False
         self._lane_invasion_step = False
 
+        self.left_lane_band = False
+
         self.exceeded = False          # has ego passed the lead car?
         self.returned = False          # has ego come back to original lane?
+        # self.overtake = False          # has a full overtake been completed?
+
+        # --- NEW: distance and lead metrics for CSV ---
+        self.prev_ego_location = None  # carla.Location of ego at previous step
+        self.travel_distance = 0.0     # accumulated [m] over episode
+        self.min_ego_lead_dist = float("inf")  # best (smallest) ego–lead distance
 
     def _hard_world_cleanup(self):
         actors = self.world.get_actors()
@@ -527,9 +535,32 @@ class CarlaOvertakeStudentEnv(gym.Env):
 
         self._collision_step = False
         self._lane_invasion_step = False
+        start_xy = np.array([EGO_SPAWN_POINT[self.spawn_index][0],
+                            EGO_SPAWN_POINT[self.spawn_index][1]], dtype=np.float32)
+        goal_xy  = np.array([EGO_END_POINT[self.spawn_index][0],
+                            EGO_END_POINT[self.spawn_index][1]], dtype=np.float32)
 
+        self._road_dir = goal_xy - start_xy
+        norm = np.linalg.norm(self._road_dir)
+        if norm < 1e-6:
+            self._road_dir = np.array([0.0, 1.0], dtype=np.float32)  # fallback
+        else:
+            self._road_dir /= norm
+
+        self._road_start_xy = start_xy
+        self.left_lane_band = False
         self.exceeded = False
-        self.returned = False        
+        self.returned = False 
+
+
+        self._prev_ego_s  = None
+        self._prev_lead_s = None
+
+        # --- NEW: reset distance and lead tracking ---
+        self.prev_ego_location = self.ego.get_location()
+        self.travel_distance = 0.0
+        self.min_ego_lead_dist = float("inf")     
+
 
         print("Environment reset")
 
@@ -614,19 +645,76 @@ class CarlaOvertakeStudentEnv(gym.Env):
             self.other_vehicles = []
             self.reset_other_vehicles()
 
+        # --- NEW: per-step distances for CSV / metrics ---
+        cur_loc = self.ego.get_location()
+        if self.prev_ego_location is None:
+            step_dist = 0.0
+        else:
+            step_dist = distance_2d(cur_loc, self.prev_ego_location)
+        self.travel_distance += step_dist
+        self.prev_ego_location = cur_loc
+
+        if self.nonego is not None and self.nonego.is_alive:
+            lead_loc = self.nonego.get_location()
+            ego_lead_dist = distance_2d(cur_loc, lead_loc)
+            self.min_ego_lead_dist = min(self.min_ego_lead_dist, ego_lead_dist)
+        else:
+            ego_lead_dist = float("inf")
+
         # --- sparse-success tracking (NEW) ---
         ego_x, ego_y = self.get_vehicle_pos(self.ego)
         lead_x, lead_y = self.get_vehicle_pos(self.nonego)
 
-        # “exceeded” = ego y passes beyond lead y (you already use this in teacher env)
-        if not self.exceeded and ego_y < lead_y:
+        ego_xy  = np.array([ego_x,  ego_y],  dtype=np.float32)
+        lead_xy = np.array([lead_x, lead_y], dtype=np.float32)
+
+        # scalar progress along the road
+        ego_s  = float(np.dot(ego_xy  - self._road_start_xy, self._road_dir))
+        lead_s = float(np.dot(lead_xy - self._road_start_xy, self._road_dir))
+
+        # "exceeded" = ego was not ahead before, and is now ahead along the road
+        if not self.exceeded and ego_s > lead_s:
             self.exceeded = True
 
+        # # “exceeded” = ego y passes beyond lead y (you already use this in teacher env)
+        # if not self.exceeded and ego_y < lead_y:
+        #     self.exceeded = True
+
         # “returned” = back in original lane center band
+        # lane_center_x = EGO_SPAWN_POINT[self.spawn_index][0]
+        # in_original_lane = abs(ego_x - lane_center_x) < TERMINAL["lane_width"] / 5.0
+        # if self.exceeded and in_original_lane:
+        #     self.returned = True
+
         lane_center_x = EGO_SPAWN_POINT[self.spawn_index][0]
-        in_original_lane = abs(ego_x - lane_center_x) < TERMINAL["lane_width"] / 5.0
-        if self.exceeded and in_original_lane:
+        band = TERMINAL["lane_width"] / 5.0
+        in_original_lane_band = abs(ego_x - lane_center_x) < band
+
+        # mark that we have *left* the band at least once
+        if not in_original_lane_band:
+            self.left_lane_band = True
+
+        # “returned” = we passed the lead car, left the band at some point,
+        # and came *back* into the band
+        if (not self.returned
+            and self.exceeded
+            and self.left_lane_band
+            and in_original_lane_band):
             self.returned = True
+
+        # overtaken: exceeded + returned + sufficiently ahead in y
+        # if (
+        #     self.exceeded and self.returned
+        #     and ego_y + REWARD["reward_overtake_dist"] < lead_y
+        # ):
+        #     self.overtake = True
+        if (
+            not self.overtake
+            and self.exceeded
+            and self.returned
+            and ego_y > lead_y + REWARD["reward_overtake_dist"]
+        ):
+            self.overtake = True
         # --------------------------------------
         
         # 4. Update waypoint
@@ -660,6 +748,16 @@ class CarlaOvertakeStudentEnv(gym.Env):
         self._lane_invasion_step = False
 
         info_dict["off_center_m"] = abs(self.get_signed_lane_offset())
+
+        # --- NEW: distance-related metrics for CSV ---
+        info_dict["step_distance"]    = float(step_dist)          # per-step [m]
+        info_dict["travel_distance"]  = float(self.travel_distance)  # cumulative [m]
+        info_dict["ego_lead_dist"]    = float(ego_lead_dist)      # current ego–lead distance [m]
+
+        # NEW: expose episode-level events to logger
+        info_dict["exceed"]   = int(self.exceeded)
+        info_dict["returned"] = int(self.returned)
+        info_dict["overtake"] = int(self.overtake)
 
 
         # 4. Check termination
@@ -1045,18 +1143,18 @@ class CarlaOvertakeStudentEnv(gym.Env):
         # Recompute simple out_of_lane test (same as in _check_termination)
         ego_loc = self.ego.get_transform().location
         spawn_x = EGO_SPAWN_POINT[self.spawn_index][0]
-        if spawn_x == -16.890745162963867:
-            left_bound  = spawn_x - 2.5
+        if spawn_x == -515.14:
+            left_bound  = spawn_x - 3.5
+            right_bound = spawn_x + 5.5
+        elif spawn_x == -511.30:
+            left_bound  = spawn_x - 4.5
             right_bound = spawn_x + 4.5
-        elif spawn_x == -13.395880699157715:
-            left_bound  = spawn_x - 3.5
+        elif spawn_x == -507.37:
+            left_bound  = spawn_x - 4.5
+            right_bound = spawn_x + 4.5
+        elif spawn_x == -503.85:
+            left_bound  = spawn_x - 4.5
             right_bound = spawn_x + 3.5
-        elif spawn_x == -9.890790939331055:
-            left_bound  = spawn_x - 3.5
-            right_bound = spawn_x + 3.5
-        elif spawn_x == -6.395920276641846:
-            left_bound  = spawn_x - 3.5
-            right_bound = spawn_x + 2.5
         else:
             left_bound, right_bound = spawn_x - 4.0, spawn_x + 4.0
 
@@ -1174,18 +1272,18 @@ class CarlaOvertakeStudentEnv(gym.Env):
             
         out_of_lane = False
 
-        if EGO_SPAWN_POINT[self.spawn_index][0] == -16.890745162963867:
-            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 2.5
+        if EGO_SPAWN_POINT[self.spawn_index][0] == -515.14:
+            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
+            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 5.5
+        elif EGO_SPAWN_POINT[self.spawn_index][0] == -511.30:
+            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 4.5
             right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 4.5
-        elif EGO_SPAWN_POINT[self.spawn_index][0] == -13.395880699157715:
-            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
+        elif EGO_SPAWN_POINT[self.spawn_index][0] == -507.37:
+            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 4.5
+            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 4.5
+        elif EGO_SPAWN_POINT[self.spawn_index][0] == -503.85:
+            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 4.5
             right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 3.5
-        elif EGO_SPAWN_POINT[self.spawn_index][0] == -9.890790939331055:
-            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
-            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 3.5
-        elif EGO_SPAWN_POINT[self.spawn_index][0] == -6.395920276641846:
-            left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
-            right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 2.5
 
         if ego_loc.x < left_bound or ego_loc.x > right_bound:
             out_of_lane = True

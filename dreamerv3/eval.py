@@ -59,7 +59,7 @@ def eval_only(agent, env, logger, args):
         f = open(str(path), "a", newline="")
         fieldnames = [
             "episode_index","env_step","length","return",
-            "success","collision","time_exceeded","not_moving","past_goal",
+            "success","collision","time_exceeded","not_moving","past_goal","out_of_lane",
             # --- NEW metrics ---
             "distance_m", "distance_km",
             "collisions_per_km", "lane_invasions", "lane_invasions_per_km",
@@ -104,6 +104,7 @@ def eval_only(agent, env, logger, args):
         time_exceeded = int(_any("time_exceeded"))
         not_moving = int(_any("not_moving"))
         past_goal = int(_any("past_goal"))
+        out_of_lane = int(_any("out_of_lane"))
 
         exceed = int(_any("exceed"))
         returned = int(_any("returned"))
@@ -124,6 +125,7 @@ def eval_only(agent, env, logger, args):
             "time_exceeded": int(_any("time_exceeded")),
             "not_moving": int(_any("not_moving")),
             "past_goal": int(_any("past_goal")),
+            "out_of_lane": int(_any("out_of_lane")),
             # --- NEW metrics ---
             "distance_m": distance_m,
             "distance_km": distance_km,
