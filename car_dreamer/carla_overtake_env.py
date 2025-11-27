@@ -92,7 +92,7 @@ def distance_2d(loc1, loc2):
 # --------------------------------------------------------------------------------
 # Example single-file environment for overtaking
 # --------------------------------------------------------------------------------
-class CarlaOvertakeTestEnv(gym.Env):
+class CarlaOvertakeEnv(gym.Env):
     def __init__(self, config):
         super().__init__()
 
@@ -1328,16 +1328,16 @@ class CarlaOvertakeTestEnv(gym.Env):
             
         out_of_lane = False
 
-        if EGO_SPAWN_POINT[self.spawn_index][0] == -515.14:
+        if EGO_SPAWN_POINT[self.spawn_index][0] == -16.890745162963867:
             left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 3.5
             right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 5.5
-        elif EGO_SPAWN_POINT[self.spawn_index][0] == -511.30:
+        elif EGO_SPAWN_POINT[self.spawn_index][0] == -13.395880699157715:
             left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 4.5
             right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 4.5
-        elif EGO_SPAWN_POINT[self.spawn_index][0] == -507.37:
+        elif EGO_SPAWN_POINT[self.spawn_index][0] == -9.890790939331055:
             left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 4.5
             right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 4.5
-        elif EGO_SPAWN_POINT[self.spawn_index][0] == -503.85:
+        elif EGO_SPAWN_POINT[self.spawn_index][0] == -6.395920276641846:
             left_bound = EGO_SPAWN_POINT[self.spawn_index][0] - 4.5
             right_bound = EGO_SPAWN_POINT[self.spawn_index][0] + 3.5
 

@@ -164,3 +164,52 @@
    ```bash
    bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_student/checkpoint.ckpt --task carla_overtake_student_test --dreamerv3.logdir ./eval_logdir/eval_overtake_student_unseen
    ```
+
+### Evaluate Student on Sparse Reward - Overtaking Seen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtaking_student_sparse/checkpoint.ckpt --task carla_overtake_student --dreamerv3.logdir ./eval_logdir/eval_overtake_student_sparse_seen
+   ```
+
+### Evaluate Student on Sparse Reward - Overtaking Unseen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtaking_student_sparse/checkpoint.ckpt --task carla_overtake_student_test --dreamerv3.logdir ./eval_logdir/eval_overtake_student_sparse_unseen
+   ```
+
+### Evaluate Student on Sparse Reward and HER without Distillation - Overtaking Seen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_HER_without_distillation/checkpoint.ckpt --task carla_overtake_student --dreamerv3.logdir ./eval_logdir/eval_overtake_student_HER_without_distillation_seen
+   ```
+
+### Evaluate Student on Sparse Reward and HER without Distillation - Overtaking Unseen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_HER_without_distillation/checkpoint.ckpt --task carla_overtake_student_test --dreamerv3.logdir ./eval_logdir/eval_overtake_student_HER_without_distillation_unseen
+   ```
+
+### Evaluate Student on Sparse Reward and HER with Distillation - Overtaking Seen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_HER_with_distillation/checkpoint.ckpt --task carla_overtake_student --dreamerv3.logdir ./eval_logdir/eval_overtake_student_HER_with_distillation_seen
+   ```
+
+### Evaluate Student on Sparse Reward and HER with Distillation - Overtaking Unseen
+
+   Evaluate the DreamerV3 teacher model for the overtaking task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_HER_with_distillation/checkpoint.ckpt --task carla_overtake_student_test --dreamerv3.logdir ./eval_logdir/eval_overtake_student_HER_with_distillation_unseen
+   ```
+
