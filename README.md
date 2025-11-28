@@ -131,7 +131,7 @@
 
 # 2. Evaluation Setups for CARLA Overtaking and Lane Following Tasks
 
-## 1. Evaluation Teacher on Dense Reward on CARLA Overtaking and Lane Following Tasks  
+## 1. Evaluation on CARLA Overtaking 
 
 ### Evaluate Teacher - Overtaking Seen
 
@@ -211,5 +211,87 @@
 
    ```bash
    bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_overtake_HER_with_distillation/checkpoint.ckpt --task carla_overtake_student_test --dreamerv3.logdir ./eval_logdir/eval_overtake_student_HER_with_distillation_unseen
+   ```
+
+## 2. Evaluation Teacher on CARLA Lane Following Tasks  
+
+### Evaluate Teacher - Lane Following Seen
+
+   Evaluate the DreamerV3 teacher model for the lane following task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_teacher/checkpoint.ckpt --task carla_lane_following --dreamerv3.logdir ./eval_logdir/eval_lane_following_teacher_seen
+   ```
+
+### Evaluate Teacher - Lane Following Unseen
+
+   Evaluate the DreamerV3 teacher model for the lane follwoing task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_teacher/checkpoint.ckpt --task carla_lane_following_test --dreamerv3.logdir ./eval_logdir/eval_lane_following_teacher_unseen
+   ```
+
+### Evaluate Student - Lane Following Seen
+
+   Evaluate the DreamerV3 student model for the lane following task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_student/checkpoint.ckpt --task carla_lane_following_student --dreamerv3.logdir ./eval_logdir/eval_lane_following_student_seen
+   ```
+
+### Evaluate Student - Lane Following Unseen
+
+   Evaluate the DreamerV3 teacher model for the lane following task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_student/checkpoint.ckpt --task carla_lane_following_student_test --dreamerv3.logdir ./eval_logdir/eval_lane_following_student_unseen
+   ```
+
+### Evaluate Student on Sparse Reward - Lane Following Seen
+
+   Evaluate the DreamerV3 teacher model for the lane following task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_student_sparse/checkpoint.ckpt --task carla_lane_following_student --dreamerv3.logdir ./eval_logdir/eval_lane_following_student_sparse_seen
+   ```
+
+### Evaluate Student on Sparse Reward - Lane Following Unseen
+
+   Evaluate the DreamerV3 teacher model for the lane following task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_student_sparse/checkpoint.ckpt --task carla_lane_following_student_test --dreamerv3.logdir ./eval_logdir/eval_lane_following_student_sparse_unseen
+   ```
+
+### Evaluate Student on Sparse Reward and HER without Distillation - Lane Following Seen
+
+   Evaluate the DreamerV3 teacher model for the lane following task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_HER_without_distillation/checkpoint.ckpt --task carla_lane_following_student --dreamerv3.logdir ./eval_logdir/eval_lane_following_student_HER_without_distillation_seen
+   ```
+
+### Evaluate Student on Sparse Reward and HER without Distillation - Lane Following Unseen
+
+   Evaluate the DreamerV3 teacher model for the lane following task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_HER_without_distillation/checkpoint.ckpt --task carla_lane_following_student_test --dreamerv3.logdir ./eval_logdir/eval_lane_following_student_HER_without_distillation_unseen
+   ```
+
+### Evaluate Student on Sparse Reward and HER with Distillation - Lane Following Seen
+
+   Evaluate the DreamerV3 teacher model for the lane following task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_HER_with_distillation/checkpoint.ckpt --task carla_lane_following_student --dreamerv3.logdir ./eval_logdir/eval_lane_following_student_HER_with_distillation_seen
+   ```
+
+### Evaluate Student on Sparse Reward and HER with Distillation - Lane Following Unseen
+
+   Evaluate the DreamerV3 teacher model for the lane following task:
+
+   ```bash
+   bash eval_dm3_teacher.sh 3000 0 ./logdir/carla_lane_following_HER_with_distillation/checkpoint.ckpt --task carla_lane_following_student_test --dreamerv3.logdir ./eval_logdir/eval_lane_following_student_HER_with_distillation_unseen
    ```
 
