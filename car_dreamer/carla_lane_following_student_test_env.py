@@ -247,6 +247,22 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         self.off_center_sum = 0.0
         self.off_center_steps = 0
 
+        self._last_rgb = None
+
+        self.goal_radius = 2.0     # meters
+        self.R_goal = 200.0
+        self.R_collision = 150.0   # moderate to avoid "always stop"
+
+        # self._collision_step = False
+        # self._lane_invasion_step = False
+
+    def lane_invasion_data(self, event):
+        self.lane_invasion_hist.append(event)
+        self.lane_invasion_detected = True
+
+        # NEW: count lane invasions for metrics
+        self.previous_lane_invasions += 1
+
     def _next_spawn_index(self):
         if not self._spawn_queue:
             self._spawn_queue.extend(np.random.permutation(len(EGO_SPAWN_POINT)))
@@ -691,9 +707,9 @@ class CarlaLaneFollowingStudentTestEnv(gym.Env):
         self.collision_hist.append(event)
         self.collision_detected = True
 
-    def lane_invasion_data(self, event):
-        self.lane_invasion_hist.append(event)
-        self.lane_invasion_detected = True
+    # def lane_invasion_data(self, event):
+    #     self.lane_invasion_hist.append(event)
+    #     self.lane_invasion_detected = True
 
     # --------------------------------------------------------------------------
     #Apply Control
