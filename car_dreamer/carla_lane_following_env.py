@@ -203,6 +203,12 @@ class CarlaLaneFollowingEnv(gym.Env):
         self.previous_lane_invasions = 0
         self.previous_collisions = 0
 
+        # --- NEW: distance and lane metrics for logging ---
+        self.prev_ego_location = None
+        self.travel_distance_m = 0.0
+        self.off_center_sum = 0.0
+        self.off_center_steps = 0
+
     def _next_spawn_index(self):
         if not self._spawn_queue:
             self._spawn_queue.extend(np.random.permutation(len(EGO_SPAWN_POINT)))
@@ -355,6 +361,12 @@ class CarlaLaneFollowingEnv(gym.Env):
         self.speed_kmh = None
         self.previous_collisions = 0
         self.previous_lane_invasions = 0
+
+        # --- NEW: reset distance and off-centre accumulators ---
+        self.prev_ego_location = self.ego.get_location()
+        self.travel_distance_m = 0.0
+        self.off_center_sum = 0.0
+        self.off_center_steps = 0
         
 
         print("Environment reset")
@@ -427,6 +439,15 @@ class CarlaLaneFollowingEnv(gym.Env):
 
         # 3. Tick the world
         self.world.tick()
+
+        # --- NEW: per-step distance and total distance ---
+        cur_loc = self.ego.get_location()
+        if self.prev_ego_location is None:
+            step_dist = 0.0
+        else:
+            step_dist = distance_2d(cur_loc, self.prev_ego_location)
+        self.travel_distance_m += step_dist
+        self.prev_ego_location = cur_loc
         
         # 4. Update waypoint
 
@@ -452,6 +473,19 @@ class CarlaLaneFollowingEnv(gym.Env):
         # 7. Compute reward
         reward, info_dict = self._compute_reward()
 
+        # --- NEW: lane-following evaluation metrics per step ---
+        lane_offset = self.get_lane_offset()      # metres, >= 0
+        heading_err = self.get_angle_offset()     # your code normalizes by pi
+
+        # accumulate for episode averages
+        self.off_center_sum += float(lane_offset)
+        self.off_center_steps += 1
+
+        info_dict["step_distance"]      = float(step_dist)
+        info_dict["off_center_m"]       = float(lane_offset)
+        info_dict["heading_error"]      = float(heading_err)
+        info_dict["speed_kmh"]          = float(self.speed_kmh)
+        info_dict["lane_invasion_step"] = int(getattr(self, "_lane_invasion_step", 0))
 
         # 4. Check termination
         done, terminal_info = self._check_termination()
@@ -727,6 +761,8 @@ class CarlaLaneFollowingEnv(gym.Env):
 
         reward_components = {}
 
+        self._lane_invasion_step = 0
+
         r_waypoints = 0.0
         if self.num_completed > 0:
             r_waypoints = 60.0 * self.num_completed
@@ -801,9 +837,16 @@ class CarlaLaneFollowingEnv(gym.Env):
         reward_components["low_speed"] = r_low_speed
 
         # (E) Lane invasion – penalise *new* invasions
+        # new_inv = len(self.lane_invasion_hist) - self.previous_lane_invasions
+        # r_invasion = -20.0 * new_inv
+        # self.previous_lane_invasions += new_inv
+        # reward_components["invasion"] = r_invasion
+
         new_inv = len(self.lane_invasion_hist) - self.previous_lane_invasions
         r_invasion = -20.0 * new_inv
         self.previous_lane_invasions += new_inv
+        # NEW: log how many invasions happened this step
+        self._lane_invasion_step = new_inv
         reward_components["invasion"] = r_invasion
 
         # (F) Collision – penalise each collision
@@ -934,6 +977,15 @@ class CarlaLaneFollowingEnv(gym.Env):
             terminated = True          # Gymnasium’s “time-limit”
             info["time_exceeded"] = True
             info["elapsed_steps"] = self._time_step
+
+        # --- episode-level metrics for logging ---
+        info["distance_m"] = float(self.travel_distance_m)
+        info["distance_km"] = float(self.travel_distance_m) / 1000.0
+        info["lane_invasions"] = int(self.previous_lane_invasions)
+        if self.off_center_steps > 0:
+            info["mean_off_center_m"] = float(self.off_center_sum / self.off_center_steps)
+        else:
+            info["mean_off_center_m"] = 0.0
 
         return terminated , info
 
